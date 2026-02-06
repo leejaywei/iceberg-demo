@@ -1683,7 +1683,7 @@ class Suite:
         run_sql(self.spark, f"""
             CALL {self.catalog}.system.migrate(
               table => '{self.db}.src_parquet_tbl',
-              backup_table_name => '{self.db}.src_parquet_tbl_BACKUP_',
+              backup_table_name => '{self.db}.src_parquet_tbl_BACKUP',
               drop_backup => false
             )
         """, show=True)
