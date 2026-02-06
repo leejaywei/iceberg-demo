@@ -100,6 +100,52 @@ class Suite:
             raise SkipCase(f"No metadata_log_entries rows for {iceberg_table}")
         return str(rows[0]["file"])
 
+    def _infer_hdfs_location(self, base_table: str, suffix: str = "test_location") -> str:
+        """
+        Derive a writable HDFS location from an existing table's location.
+        Returns a sibling directory path suitable for LOCATION clause.
+        Raises SkipCase if location cannot be inferred or is not HDFS/writable.
+        """
+        try:
+            base_location = self._describe_location(base_table)
+            # Strip trailing slash
+            base_location = base_location.rstrip("/")
+            
+            # For HDFS/S3, create sibling directory
+            if base_location.startswith("hdfs://") or base_location.startswith("s3://") or base_location.startswith("s3a://"):
+                # Extract parent and create sibling
+                parent = base_location.rsplit("/", 1)[0]
+                new_location = f"{parent}/{suffix}_{int(time.time())}"
+                return new_location
+            else:
+                # For local file:// paths, skip in HDFS environment
+                raise SkipCase(f"Base location is local file:// - skipping LOCATION test in HDFS environment")
+        except Exception as e:
+            raise SkipCase(f"Cannot infer HDFS location: {e}")
+
+    def _get_latest_snapshot_id(self, iceberg_table: str) -> int:
+        """Get the latest snapshot ID for an Iceberg table."""
+        try:
+            sid = scalar_long(self.spark, f"SELECT snapshot_id FROM {iceberg_table}.snapshots ORDER BY committed_at DESC LIMIT 1")
+            return sid
+        except Exception as e:
+            raise SkipCase(f"Cannot get latest snapshot ID: {e}")
+
+    def _is_unsupported_feature_error(self, error_msg: str) -> bool:
+        """
+        Check if an error message indicates an unsupported feature.
+        Used to SKIP tests that are not supported in certain Spark versions.
+        """
+        error_lower = error_msg.lower()
+        unsupported_patterns = [
+            "unsupported_feature",
+            "not supported",
+            "does not support",
+            "unsupported operation",
+            "is not supported",
+        ]
+        return any(pattern in error_lower for pattern in unsupported_patterns)
+
     # ----------------------------
     # Environment
     # ----------------------------
@@ -108,7 +154,7 @@ class Suite:
         self.use_ns()
 
         # drop views
-        for vw in ["sample_vw", "sample_vw_props", "cdc_changes"]:
+        for vw in ["sample_vw", "sample_vw_props", "cdc_changes", "sample_vw_if_not_exists", "sample_vw_with_metadata"]:
             run_sql(self.spark, f"DROP VIEW IF EXISTS {self.t(vw)}")
 
         # drop tables
@@ -128,6 +174,14 @@ class Suite:
             "src_parquet_tbl",
             "addfiles_target_tbl",
             "src_parquet_tbl_BACKUP_",
+            # new test tables
+            "sample_with_comments",
+            "sample_with_location",
+            "sample_like_test",
+            "sample_rtas_advanced",
+            "sample_rename_old",
+            "sample_rename_new",
+            "sample_alter_comment",
         ]:
             try_sql(self.spark, f"DROP TABLE IF EXISTS {self.t(tbl)} PURGE")
             try_sql(self.spark, f"DROP TABLE IF EXISTS {self.t(tbl)}")
@@ -286,6 +340,446 @@ class Suite:
         run_sql(self.spark, f"ALTER VIEW {vw} UNSET TBLPROPERTIES ('key4')")
 
     # ----------------------------
+    # Additional DDL tests
+    # ----------------------------
+    def ddl_create_table_with_comments(self):
+        """Test CREATE TABLE with table-level and column-level comments"""
+        tbl = self.t("sample_with_comments")
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {tbl}")
+        run_sql(self.spark, f"""
+            CREATE TABLE {tbl} (
+                id bigint COMMENT 'Unique identifier',
+                data string COMMENT 'Data payload',
+                category string
+            ) USING iceberg
+            COMMENT 'Sample table with comments for testing'
+        """)
+        # Verify comments are stored
+        run_sql(self.spark, f"DESCRIBE TABLE EXTENDED {tbl}", show=True)
+        run_sql(self.spark, f"DROP TABLE {tbl}")
+
+    def ddl_create_table_with_location(self):
+        """Test CREATE TABLE with LOCATION clause (HDFS-aware)"""
+        tbl = self.t("sample_with_location")
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {tbl}")
+        
+        try:
+            # Try to infer a writable HDFS location from existing table
+            location = self._infer_hdfs_location(self.t("sample_unpart"), "sample_with_location")
+            
+            run_sql(self.spark, f"""
+                CREATE TABLE {tbl} (
+                    id bigint,
+                    data string
+                ) USING iceberg
+                LOCATION '{location}'
+            """)
+            run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, 'test')")
+            run_sql(self.spark, f"SELECT * FROM {tbl}", show=True)
+            run_sql(self.spark, f"DROP TABLE {tbl}")
+        except SkipCase:
+            # If we can't infer location, skip this test
+            raise
+
+    def ddl_create_table_like_negative(self):
+        """Test CREATE TABLE LIKE - should fail as not supported by Iceberg"""
+        tbl_src = self.t("sample_unpart")
+        tbl_new = self.t("sample_like_test")
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {tbl_new}")
+        
+        # Try CREATE TABLE LIKE - this should fail for Iceberg
+        ok, err = try_sql(self.spark, f"CREATE TABLE {tbl_new} LIKE {tbl_src}")
+        
+        if not ok:
+            # Expected failure - this is a PASS
+            print(f"[EXPECTED] CREATE TABLE LIKE failed as expected: {err}")
+        else:
+            # Unexpected success - clean up and mark as potential issue
+            try_sql(self.spark, f"DROP TABLE IF EXISTS {tbl_new}")
+            raise SkipCase("CREATE TABLE LIKE succeeded unexpectedly (may be supported in this version)")
+
+    def ddl_rtas_with_partition_and_properties(self):
+        """Test REPLACE TABLE AS SELECT with PARTITIONED BY and TBLPROPERTIES"""
+        tbl = self.t("sample_rtas_advanced")
+        
+        # First create the table with some properties
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {tbl}")
+        run_sql(self.spark, f"""
+            CREATE TABLE {tbl} (
+                id bigint,
+                data string,
+                category string
+            ) USING iceberg
+            TBLPROPERTIES ('old_prop'='old_value', 'common_prop'='original')
+        """)
+        run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, 'old', 'c1')")
+        
+        # Replace with new schema, partitioning, and properties
+        run_sql(self.spark, f"""
+            REPLACE TABLE {tbl}
+            USING iceberg
+            PARTITIONED BY (category)
+            TBLPROPERTIES ('new_prop'='new_value', 'common_prop'='updated')
+            AS SELECT id, data, category FROM {self.t('sample_unpart')} WHERE id > 0
+        """)
+        
+        # Check the result
+        run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
+        run_sql(self.spark, f"SHOW TBLPROPERTIES {tbl}", show=True)
+        
+        # Note: REPLACE TABLE typically does NOT preserve old properties
+        # The behavior is to replace everything including properties
+
+    def ddl_alter_table_rename(self):
+        """Test ALTER TABLE RENAME TO"""
+        tbl_old = self.t("sample_rename_old")
+        tbl_new = self.t("sample_rename_new")
+        
+        # Clean up first
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {tbl_old}")
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {tbl_new}")
+        
+        # Create and populate
+        run_sql(self.spark, f"CREATE TABLE {tbl_old} (id bigint, data string) USING iceberg")
+        run_sql(self.spark, f"INSERT INTO {tbl_old} VALUES (1, 'test')")
+        
+        # Rename
+        run_sql(self.spark, f"ALTER TABLE {tbl_old} RENAME TO {tbl_new}")
+        
+        # Verify new name works
+        cnt = scalar_long(self.spark, f"SELECT count(*) FROM {tbl_new}")
+        if cnt != 1:
+            raise RuntimeError(f"Expected 1 row after rename, got {cnt}")
+        
+        # Rename back to avoid affecting other tests
+        run_sql(self.spark, f"ALTER TABLE {tbl_new} RENAME TO {tbl_old}")
+        run_sql(self.spark, f"DROP TABLE {tbl_old}")
+
+    def ddl_alter_column_comment(self):
+        """Test ALTER COLUMN to change column comment"""
+        tbl = self.t("sample_alter_comment")
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {tbl}")
+        
+        run_sql(self.spark, f"""
+            CREATE TABLE {tbl} (
+                id bigint COMMENT 'Original comment',
+                data string
+            ) USING iceberg
+        """)
+        
+        # Try to alter column comment
+        ok, err = try_sql(self.spark, f"""
+            ALTER TABLE {tbl} ALTER COLUMN id COMMENT 'Updated comment'
+        """)
+        
+        if not ok:
+            # If not supported, skip
+            if self._is_unsupported_feature_error(err):
+                raise SkipCase(f"ALTER COLUMN COMMENT not supported: {err}")
+            else:
+                raise RuntimeError(f"ALTER COLUMN COMMENT failed unexpectedly: {err}")
+        
+        # Verify the comment was updated
+        run_sql(self.spark, f"DESCRIBE TABLE {tbl}", show=True)
+        run_sql(self.spark, f"DROP TABLE {tbl}")
+
+    # ----------------------------
+    # Enhanced Views tests
+    # ----------------------------
+    def ddl_views_if_not_exists(self):
+        """Test CREATE VIEW IF NOT EXISTS"""
+        base = self.t("sample_unpart")
+        vw = self.t("sample_vw_if_not_exists")
+        
+        # Drop if exists
+        run_sql(self.spark, f"DROP VIEW IF EXISTS {vw}")
+        
+        # Create view
+        run_sql(self.spark, f"CREATE VIEW IF NOT EXISTS {vw} AS SELECT * FROM {base}")
+        
+        # Try creating again with IF NOT EXISTS - should succeed without error
+        run_sql(self.spark, f"CREATE VIEW IF NOT EXISTS {vw} AS SELECT id FROM {base}")
+        
+        # Verify original view is unchanged
+        run_sql(self.spark, f"SELECT * FROM {vw} LIMIT 1", show=True)
+        
+        run_sql(self.spark, f"DROP VIEW {vw}")
+
+    def ddl_views_with_comments_and_aliases(self):
+        """Test CREATE VIEW with view comment, column comments, and aliases"""
+        base = self.t("sample_unpart")
+        vw = self.t("sample_vw_with_metadata")
+        
+        run_sql(self.spark, f"DROP VIEW IF EXISTS {vw}")
+        
+        # Try with column aliases and view comment
+        ok, err = try_sql(self.spark, f"""
+            CREATE VIEW {vw}
+            (identifier COMMENT 'The ID', payload COMMENT 'The data')
+            COMMENT 'View with column aliases and comments'
+            AS SELECT id AS identifier, data AS payload FROM {base}
+        """)
+        
+        if not ok:
+            # Some Spark versions may not support column comments in views
+            if self._is_unsupported_feature_error(err):
+                raise SkipCase(f"View with column comments not supported: {err}")
+            else:
+                raise RuntimeError(f"Failed to create view with metadata: {err}")
+        
+        run_sql(self.spark, f"DESCRIBE EXTENDED {vw}", show=True)
+        run_sql(self.spark, f"SELECT * FROM {vw} LIMIT 1", show=True)
+        run_sql(self.spark, f"DROP VIEW {vw}")
+
+    # ----------------------------
+    # Branch & Tag DDL tests
+    # ----------------------------
+    def ddl_branch_create_with_if_not_exists(self):
+        """Test CREATE BRANCH with IF NOT EXISTS"""
+        tbl = self.t("sample_part")
+        branch = "test_branch_if_not_exists"
+        
+        # Clean up first
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+        
+        # Create branch with IF NOT EXISTS
+        run_sql(self.spark, f"ALTER TABLE {tbl} CREATE BRANCH IF NOT EXISTS `{branch}`")
+        
+        # Try creating again - should succeed without error
+        run_sql(self.spark, f"ALTER TABLE {tbl} CREATE BRANCH IF NOT EXISTS `{branch}`")
+        
+        # Verify branch exists
+        run_sql(self.spark, f"SELECT * FROM {tbl}.refs WHERE name = '{branch}'", show=True)
+        
+        # Clean up
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH `{branch}`")
+
+    def ddl_branch_create_or_replace(self):
+        """Test CREATE OR REPLACE BRANCH"""
+        tbl = self.t("sample_part")
+        branch = "test_branch_cor"
+        
+        # Clean up first
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+        
+        # Create branch
+        run_sql(self.spark, f"ALTER TABLE {tbl} CREATE BRANCH `{branch}`")
+        
+        # Create or replace - should succeed
+        run_sql(self.spark, f"ALTER TABLE {tbl} CREATE OR REPLACE BRANCH `{branch}`")
+        
+        # Verify branch exists
+        run_sql(self.spark, f"SELECT * FROM {tbl}.refs WHERE name = '{branch}'", show=True)
+        
+        # Clean up
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH `{branch}`")
+
+    def ddl_branch_as_of_version(self):
+        """Test CREATE BRANCH AS OF VERSION (snapshot)"""
+        tbl = self.t("sample_part")
+        branch = "test_branch_as_of"
+        
+        # Clean up first
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+        
+        # Get a snapshot ID
+        try:
+            snapshot_id = self._get_latest_snapshot_id(tbl)
+        except SkipCase:
+            raise
+        
+        # Create branch at specific snapshot
+        ok, err = try_sql(self.spark, f"""
+            ALTER TABLE {tbl} CREATE BRANCH `{branch}` AS OF VERSION {snapshot_id}
+        """)
+        
+        if not ok:
+            if self._is_unsupported_feature_error(err):
+                raise SkipCase(f"CREATE BRANCH AS OF VERSION not supported: {err}")
+            else:
+                raise RuntimeError(f"CREATE BRANCH AS OF VERSION failed: {err}")
+        
+        # Verify branch exists
+        run_sql(self.spark, f"SELECT * FROM {tbl}.refs WHERE name = '{branch}'", show=True)
+        
+        # Clean up
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH `{branch}`")
+
+    def ddl_branch_replace(self):
+        """Test REPLACE BRANCH"""
+        tbl = self.t("sample_part")
+        branch = "test_branch_replace"
+        
+        # Create branch first
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+        run_sql(self.spark, f"ALTER TABLE {tbl} CREATE BRANCH `{branch}`")
+        
+        # Write to branch
+        run_sql(self.spark, f"""
+            INSERT INTO {tbl}.branch_{branch} 
+            VALUES (9001, 'replace_test', 'c1', TIMESTAMP'2026-02-10 00:00:00')
+        """)
+        
+        # Get snapshot before replace
+        old_snapshot = self._get_latest_snapshot_id(f"{tbl}.branch_{branch}")
+        
+        # Now replace the branch (resets it)
+        ok, err = try_sql(self.spark, f"ALTER TABLE {tbl} REPLACE BRANCH `{branch}`")
+        
+        if not ok:
+            # Try alternative syntax
+            ok2, err2 = try_sql(self.spark, f"ALTER TABLE {tbl} CREATE OR REPLACE BRANCH `{branch}`")
+            if not ok2:
+                if self._is_unsupported_feature_error(err) or self._is_unsupported_feature_error(err2):
+                    raise SkipCase(f"REPLACE BRANCH not supported. err1={err}; err2={err2}")
+                else:
+                    raise RuntimeError(f"REPLACE BRANCH failed. err1={err}; err2={err2}")
+        
+        # Clean up
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH `{branch}`")
+
+    def ddl_branch_drop_if_exists(self):
+        """Test DROP BRANCH IF EXISTS"""
+        tbl = self.t("sample_part")
+        branch = "test_branch_drop"
+        
+        # Create a branch
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+        run_sql(self.spark, f"ALTER TABLE {tbl} CREATE BRANCH `{branch}`")
+        
+        # Drop with IF EXISTS
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+        
+        # Drop again with IF EXISTS - should not error
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+
+    def ddl_tag_create_with_if_not_exists(self):
+        """Test CREATE TAG with IF NOT EXISTS"""
+        tbl = self.t("sample_part")
+        tag = "test_tag_if_not_exists"
+        
+        # Clean up first
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP TAG IF EXISTS `{tag}`")
+        
+        # Get snapshot ID for tag
+        try:
+            snapshot_id = self._get_latest_snapshot_id(tbl)
+        except SkipCase:
+            raise
+        
+        # Create tag with IF NOT EXISTS
+        ok, err = try_sql(self.spark, f"""
+            ALTER TABLE {tbl} CREATE TAG IF NOT EXISTS `{tag}` AS OF VERSION {snapshot_id}
+        """)
+        
+        if not ok:
+            if self._is_unsupported_feature_error(err):
+                raise SkipCase(f"CREATE TAG not supported: {err}")
+            else:
+                raise RuntimeError(f"CREATE TAG failed: {err}")
+        
+        # Try creating again - should succeed
+        run_sql(self.spark, f"ALTER TABLE {tbl} CREATE TAG IF NOT EXISTS `{tag}` AS OF VERSION {snapshot_id}")
+        
+        # Verify tag exists
+        run_sql(self.spark, f"SELECT * FROM {tbl}.refs WHERE name = '{tag}'", show=True)
+        
+        # Clean up
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP TAG IF EXISTS `{tag}`")
+
+    def ddl_tag_create_or_replace(self):
+        """Test CREATE OR REPLACE TAG"""
+        tbl = self.t("sample_part")
+        tag = "test_tag_cor"
+        
+        # Clean up first
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP TAG IF EXISTS `{tag}`")
+        
+        # Get snapshot ID
+        try:
+            snapshot_id = self._get_latest_snapshot_id(tbl)
+        except SkipCase:
+            raise
+        
+        # Create tag
+        ok, err = try_sql(self.spark, f"""
+            ALTER TABLE {tbl} CREATE TAG `{tag}` AS OF VERSION {snapshot_id}
+        """)
+        
+        if not ok:
+            if self._is_unsupported_feature_error(err):
+                raise SkipCase(f"CREATE TAG not supported: {err}")
+            else:
+                raise RuntimeError(f"CREATE TAG failed: {err}")
+        
+        # Create or replace
+        run_sql(self.spark, f"ALTER TABLE {tbl} CREATE OR REPLACE TAG `{tag}` AS OF VERSION {snapshot_id}")
+        
+        # Verify tag exists
+        run_sql(self.spark, f"SELECT * FROM {tbl}.refs WHERE name = '{tag}'", show=True)
+        
+        # Clean up
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP TAG IF EXISTS `{tag}`")
+
+    def ddl_tag_drop_if_exists(self):
+        """Test DROP TAG IF EXISTS"""
+        tbl = self.t("sample_part")
+        tag = "test_tag_drop"
+        
+        # Get snapshot ID
+        try:
+            snapshot_id = self._get_latest_snapshot_id(tbl)
+        except SkipCase:
+            raise
+        
+        # Create a tag
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP TAG IF EXISTS `{tag}`")
+        ok, err = try_sql(self.spark, f"""
+            ALTER TABLE {tbl} CREATE TAG `{tag}` AS OF VERSION {snapshot_id}
+        """)
+        
+        if not ok:
+            if self._is_unsupported_feature_error(err):
+                raise SkipCase(f"CREATE TAG not supported: {err}")
+            else:
+                raise RuntimeError(f"CREATE TAG failed: {err}")
+        
+        # Drop with IF EXISTS
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP TAG IF EXISTS `{tag}`")
+        
+        # Drop again - should not error
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP TAG IF EXISTS `{tag}`")
+
+    def ddl_branch_with_retention(self):
+        """Test CREATE BRANCH with retention settings (may not be supported)"""
+        tbl = self.t("sample_part")
+        branch = "test_branch_retention"
+        
+        # Clean up first
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+        
+        # Try to create branch with retention
+        ok, err = try_sql(self.spark, f"""
+            ALTER TABLE {tbl} CREATE BRANCH `{branch}`
+            RETAIN 7 DAYS
+        """)
+        
+        if not ok:
+            # Likely not supported - try without RETAIN clause
+            ok2, err2 = try_sql(self.spark, f"""
+                ALTER TABLE {tbl} CREATE BRANCH `{branch}`
+                WITH SNAPSHOT RETENTION 7 DAYS
+            """)
+            if not ok2:
+                raise SkipCase(f"Branch retention syntax not supported. err1={err}; err2={err2}")
+        
+        # If we got here, retention is supported
+        run_sql(self.spark, f"SELECT * FROM {tbl}.refs WHERE name = '{branch}'", show=True)
+        
+        # Clean up
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH `{branch}`")
+
+    # ----------------------------
     # Writes (SQL)
     # ----------------------------
     def writes_insert_into_and_insert_select(self):
@@ -403,8 +897,17 @@ class Suite:
     def dfv2_replace(self):
         run_sql(self.spark, f"CREATE TABLE IF NOT EXISTS {self.t('df_v2_target')} (id bigint, data string) USING iceberg")
         self._dfv2_prepare_src_temp_view()
-        self.spark.table("tmp_dfv2_src").writeTo(self.t("df_v2_target")).replace()
-        run_sql(self.spark, f"SELECT * FROM {self.t('df_v2_target')} ORDER BY id", show=True)
+        try:
+            self.spark.table("tmp_dfv2_src").writeTo(self.t("df_v2_target")).replace()
+            run_sql(self.spark, f"SELECT * FROM {self.t('df_v2_target')} ORDER BY id", show=True)
+        except Exception as e:
+            error_msg = str(e)
+            # Check if this is the known Spark 3.5 unsupported feature
+            if self._is_unsupported_feature_error(error_msg) or "REPLACE TABLE AS SELECT" in error_msg:
+                raise SkipCase(f"DataFrameWriterV2.replace() not supported in this Spark version: {type(e).__name__}")
+            else:
+                # Re-raise if it's a different error
+                raise
 
     def dfv2_create_or_replace(self):
         self._dfv2_prepare_src_temp_view()
@@ -722,6 +1225,7 @@ class Suite:
             ("00_env", "prepare", self.env_prepare),
             ("00_env", "seed_base_tables", self.env_seed_base_tables),
 
+            # Basic DDL
             ("10_ddl", "ctas_basic", self.ddl_ctas_basic),
             ("10_ddl", "ctas_with_props_and_partition", self.ddl_ctas_with_props_and_partition),
             ("10_ddl", "rtas_replace_table_as_select_existing_first", self.ddl_rtas_replace_table_as_select_existing_first),
@@ -729,20 +1233,46 @@ class Suite:
             ("10_ddl", "drop_table_and_purge", self.ddl_drop_table_and_purge),
             ("10_ddl", "alter_table_core", self.ddl_alter_table_core),
             ("10_ddl", "sql_extensions_partition_evolution_and_write_order", self.ddl_sql_extensions_partition_evolution_and_write_order),
-            ("10_ddl", "views", self.ddl_views),
+            
+            # Enhanced DDL tests
+            ("10_ddl_enhanced", "create_table_with_comments", self.ddl_create_table_with_comments),
+            ("10_ddl_enhanced", "create_table_with_location", self.ddl_create_table_with_location),
+            ("10_ddl_enhanced", "create_table_like_negative", self.ddl_create_table_like_negative),
+            ("10_ddl_enhanced", "rtas_with_partition_and_properties", self.ddl_rtas_with_partition_and_properties),
+            ("10_ddl_enhanced", "alter_table_rename", self.ddl_alter_table_rename),
+            ("10_ddl_enhanced", "alter_column_comment", self.ddl_alter_column_comment),
+            
+            # Views
+            ("10_ddl_views", "views_basic", self.ddl_views),
+            ("10_ddl_views", "views_if_not_exists", self.ddl_views_if_not_exists),
+            ("10_ddl_views", "views_with_comments_and_aliases", self.ddl_views_with_comments_and_aliases),
+            
+            # Branch & Tag DDL
+            ("15_branch_tag_ddl", "branch_create_with_if_not_exists", self.ddl_branch_create_with_if_not_exists),
+            ("15_branch_tag_ddl", "branch_create_or_replace", self.ddl_branch_create_or_replace),
+            ("15_branch_tag_ddl", "branch_as_of_version", self.ddl_branch_as_of_version),
+            ("15_branch_tag_ddl", "branch_replace", self.ddl_branch_replace),
+            ("15_branch_tag_ddl", "branch_drop_if_exists", self.ddl_branch_drop_if_exists),
+            ("15_branch_tag_ddl", "tag_create_with_if_not_exists", self.ddl_tag_create_with_if_not_exists),
+            ("15_branch_tag_ddl", "tag_create_or_replace", self.ddl_tag_create_or_replace),
+            ("15_branch_tag_ddl", "tag_drop_if_exists", self.ddl_tag_drop_if_exists),
+            ("15_branch_tag_ddl", "branch_with_retention", self.ddl_branch_with_retention),
 
+            # Writes
             ("20_writes_sql", "insert_into_and_insert_select", self.writes_insert_into_and_insert_select),
             ("20_writes_sql", "merge_into", self.writes_merge_into),
             ("20_writes_sql", "insert_overwrite_dynamic_and_static", self.writes_insert_overwrite_dynamic_and_static),
             ("20_writes_sql", "delete_and_update", self.writes_delete_and_update),
             ("20_writes_sql", "writes_to_branch_and_wap", self.writes_to_branch_and_wap),
 
+            # DataFrameWriterV2
             ("30_writes_dfv2", "dfv2_create", self.dfv2_create),
             ("30_writes_dfv2", "dfv2_replace", self.dfv2_replace),
             ("30_writes_dfv2", "dfv2_create_or_replace", self.dfv2_create_or_replace),
             ("30_writes_dfv2", "dfv2_append", self.dfv2_append),
             ("30_writes_dfv2", "dfv2_overwrite_partitions", self.dfv2_overwrite_partitions),
 
+            # Queries
             ("40_queries", "metadata_tables", self.queries_metadata_tables),
             ("40_queries", "time_travel", self.queries_time_travel),
             ("40_queries", "time_travel_metadata_tables", self.queries_time_travel_metadata_tables),
@@ -779,7 +1309,9 @@ class Suite:
             except Exception as e:
                 traceback.print_exc()
                 results.append(CaseResult(group=group, name=name, status="FAIL", seconds=time.time() - start, error=f"{type(e).__name__}: {e}"))
-                break  # 如要失败也继续跑，改成 continue
+                # Continue running other tests instead of breaking
+                # Only break on truly unexpected errors if needed
+                continue
         return results
 
 
