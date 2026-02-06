@@ -653,7 +653,7 @@ class Suite:
         """)
         
         # Get snapshot before replace
-        old_snapshot = self._get_latest_snapshot_id(f"{tbl}.branch_{branch}")
+        old_snapshot = self._get_latest_snapshot_id(tbl)
         
         # Now replace the branch (resets it)
         ok, err = try_sql(self.spark, f"ALTER TABLE {tbl} REPLACE BRANCH `{branch}`")
