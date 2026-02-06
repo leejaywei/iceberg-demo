@@ -229,11 +229,6 @@ class Suite:
         run_sql(self.spark, f"INSERT INTO {self.t('sample_unpart')} VALUES (1,'a'),(2,'b')")
 
         # base partitioned
-        self._reset_sample_part()
-
-    def _reset_sample_part(self):
-        """Reset sample_part to seed state for test isolation."""
-        # Try PURGE first; fall back to plain DROP (not all catalogs support PURGE)
         try_sql(self.spark, f"DROP TABLE IF EXISTS {self.t('sample_part')} PURGE")
         try_sql(self.spark, f"DROP TABLE IF EXISTS {self.t('sample_part')}")
         run_sql(self.spark, f"""
@@ -2042,9 +2037,6 @@ class Suite:
             print("\n" + "=" * 120)
             print(f"[CASE] {group} :: {name}")
             print("=" * 120)
-            # Reset shared tables before each test for isolation (skip env setup)
-            if group != "00_env":
-                self._reset_sample_part()
             start = time.time()
             try:
                 fn()
