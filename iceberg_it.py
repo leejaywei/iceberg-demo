@@ -452,7 +452,7 @@ class Suite:
             USING iceberg
             PARTITIONED BY (category)
             TBLPROPERTIES ('new_prop'='new_value', 'common_prop'='updated')
-            AS SELECT id, data, category FROM {self.t('sample_unpart')} WHERE id > 0
+            AS SELECT id, data, category FROM {self.t('sample_part')} WHERE id > 0
         """)
         
         # Check the result
