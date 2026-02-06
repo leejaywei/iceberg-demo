@@ -1880,13 +1880,13 @@ class Suite:
         run_sql(self.spark, f"""
             CALL {self.catalog}.system.create_changelog_view(
               table => '{self.db}.cdc_tbl',
-              changelog_view => '{self.db}.cdc_changes',
+              changelog_view => 'cdc_changes',
               options => map('start-snapshot-id','{start_sid}','end-snapshot-id','{end_sid}'),
               identifier_columns => array('id')
             )
         """, show=True)
 
-        run_sql(self.spark, f"SELECT * FROM {self.t('cdc_changes')} ORDER BY _change_ordinal, id", show=True)
+        run_sql(self.spark, "SELECT * FROM cdc_changes ORDER BY _change_ordinal, id", show=True)
 
     # ----------------------------
     # Case registry + executor
