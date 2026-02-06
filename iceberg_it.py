@@ -1783,7 +1783,8 @@ class Suite:
         run_sql(self.spark, f"CALL {self.catalog}.system.set_current_snapshot(table => '{self.db}.sample_part', snapshot_id => {last_sid})", show=True)
         run_sql(self.spark, f"CALL {self.catalog}.system.rollback_to_timestamp(table => '{self.db}.sample_part', timestamp => TIMESTAMP '{last_ts}')", show=True)
 
-        ok, err = try_sql(self.spark, f"CALL {self.catalog}.system.cherrypick_snapshot(table => '{self.db}.sample_part', snapshot_id => {first_sid})", show=True)
+        run_sql(self.spark, f"CALL {self.catalog}.system.rollback_to_snapshot(table => '{self.db}.sample_part', snapshot_id => {first_sid})", show=True)
+        ok, err = try_sql(self.spark, f"CALL {self.catalog}.system.cherrypick_snapshot(table => '{self.db}.sample_part', snapshot_id => {last_sid})", show=True)
         if not ok:
             raise SkipCase(f"cherrypick_snapshot not applicable: {err}")
 
