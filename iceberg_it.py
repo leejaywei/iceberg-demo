@@ -967,6 +967,125 @@ class Suite:
         run_sql(self.spark, f"SELECT * FROM {tbl}.manifests TIMESTAMP AS OF '{ts}' LIMIT 10", show=True)
         run_sql(self.spark, f"SELECT * FROM {tbl}.partitions VERSION AS OF {sid} LIMIT 10", show=True)
 
+    def queries_data_files_metadata_table(self):
+        """Query data_files metadata table"""
+        tbl = self.t("sample_part")
+        run_sql(self.spark, f"SELECT * FROM {tbl}.data_files LIMIT 20", show=True)
+
+    def queries_delete_files_metadata_table(self):
+        """Query delete_files metadata table"""
+        tbl = self.t("sample_part")
+        run_sql(self.spark, f"SELECT * FROM {tbl}.delete_files LIMIT 20", show=True)
+
+    def queries_all_files_metadata_table(self):
+        """Query all_files metadata table"""
+        tbl = self.t("sample_part")
+        run_sql(self.spark, f"SELECT * FROM {tbl}.all_files LIMIT 20", show=True)
+
+    def queries_time_travel_branch_string(self):
+        """Time travel using string version for branch name"""
+        tbl = self.t("sample_part")
+        branch = "test_query_branch"
+        
+        # Clean up and create branch
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+        run_sql(self.spark, f"ALTER TABLE {tbl} CREATE BRANCH `{branch}`")
+        
+        # Insert data into branch
+        run_sql(self.spark, f"""
+            INSERT INTO {tbl}.branch_{branch} 
+            VALUES (300, 'branch_data', 'c1', TIMESTAMP'2026-02-03 00:00:00')
+        """)
+        
+        # Query using VERSION AS OF with string branch name
+        run_sql(self.spark, f"SELECT * FROM {tbl} VERSION AS OF '{branch}' WHERE id = 300 LIMIT 10", show=True)
+        
+        # Clean up
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH `{branch}`")
+
+    def queries_time_travel_tag_string(self):
+        """Time travel using string version for tag name"""
+        tbl = self.t("sample_part")
+        tag = "test_query_tag"
+        
+        # Clean up first
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP TAG IF EXISTS `{tag}`")
+        
+        # Get snapshot ID for tag
+        try:
+            snapshot_id = self._get_latest_snapshot_id(tbl)
+        except SkipCase:
+            raise
+        
+        # Create tag
+        ok, err = try_sql(self.spark, f"""
+            ALTER TABLE {tbl} CREATE TAG `{tag}` AS OF VERSION {snapshot_id}
+        """)
+        
+        if not ok:
+            if self._is_unsupported_feature_error(err):
+                raise SkipCase(f"CREATE TAG not supported: {err}")
+            else:
+                raise RuntimeError(f"CREATE TAG failed: {err}")
+        
+        # Query using VERSION AS OF with string tag name
+        run_sql(self.spark, f"SELECT * FROM {tbl} VERSION AS OF '{tag}' LIMIT 10", show=True)
+        
+        # Clean up
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP TAG IF EXISTS `{tag}`")
+
+    def queries_branch_identifier_form(self):
+        """Query branch via identifier form using backticks"""
+        tbl = self.t("sample_part")
+        branch = "test_query_branch_id"
+        
+        # Clean up and create branch
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+        run_sql(self.spark, f"ALTER TABLE {tbl} CREATE BRANCH `{branch}`")
+        
+        # Insert data into branch using identifier form
+        run_sql(self.spark, f"""
+            INSERT INTO {tbl}.`branch_{branch}` 
+            VALUES (400, 'branch_id_data', 'c1', TIMESTAMP'2026-02-04 00:00:00')
+        """)
+        
+        # Query using identifier form with backticks
+        run_sql(self.spark, f"SELECT * FROM {tbl}.`branch_{branch}` WHERE id = 400 LIMIT 10", show=True)
+        
+        # Clean up
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH `{branch}`")
+
+    def queries_tag_identifier_form(self):
+        """Query tag via identifier form using backticks"""
+        tbl = self.t("sample_part")
+        tag = "test_query_tag_id"
+        
+        # Clean up first
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP TAG IF EXISTS `{tag}`")
+        
+        # Get snapshot ID for tag
+        try:
+            snapshot_id = self._get_latest_snapshot_id(tbl)
+        except SkipCase:
+            raise
+        
+        # Create tag
+        ok, err = try_sql(self.spark, f"""
+            ALTER TABLE {tbl} CREATE TAG `{tag}` AS OF VERSION {snapshot_id}
+        """)
+        
+        if not ok:
+            if self._is_unsupported_feature_error(err):
+                raise SkipCase(f"CREATE TAG not supported: {err}")
+            else:
+                raise RuntimeError(f"CREATE TAG failed: {err}")
+        
+        # Query using identifier form with backticks
+        run_sql(self.spark, f"SELECT * FROM {tbl}.`tag_{tag}` LIMIT 10", show=True)
+        
+        # Clean up
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP TAG IF EXISTS `{tag}`")
+
     # ----------------------------
     # Procedures: migration env
     # ----------------------------
@@ -1276,6 +1395,13 @@ class Suite:
             ("40_queries", "metadata_tables", self.queries_metadata_tables),
             ("40_queries", "time_travel", self.queries_time_travel),
             ("40_queries", "time_travel_metadata_tables", self.queries_time_travel_metadata_tables),
+            ("40_queries", "data_files_metadata_table", self.queries_data_files_metadata_table),
+            ("40_queries", "delete_files_metadata_table", self.queries_delete_files_metadata_table),
+            ("40_queries", "all_files_metadata_table", self.queries_all_files_metadata_table),
+            ("40_queries", "time_travel_branch_string", self.queries_time_travel_branch_string),
+            ("40_queries", "time_travel_tag_string", self.queries_time_travel_tag_string),
+            ("40_queries", "branch_identifier_form", self.queries_branch_identifier_form),
+            ("40_queries", "tag_identifier_form", self.queries_tag_identifier_form),
 
             # migration/replication procedures
             ("55_procedures_migration", "migration_env_prepare", self.proc_migration_env_prepare),
