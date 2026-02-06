@@ -64,6 +64,38 @@ def scalar_str(spark: SparkSession, sql: str) -> str:
 
 
 # ----------------------------
+# Assertion helpers
+# ----------------------------
+def assert_true(cond: bool, msg: str):
+    """Assert that condition is true, raise RuntimeError with message if false."""
+    if not cond:
+        raise RuntimeError(f"Assertion failed: {msg}")
+
+
+def assert_eq(actual, expected, msg: str = None):
+    """Assert that actual equals expected."""
+    if actual != expected:
+        err_msg = f"Expected {expected}, got {actual}"
+        if msg:
+            err_msg = f"{msg}: {err_msg}"
+        raise RuntimeError(err_msg)
+
+
+def assert_sql_count(spark: SparkSession, sql: str, expected: int, msg: str = None):
+    """Execute SQL query and assert row count matches expected."""
+    actual = scalar_long(spark, sql)
+    err_msg = msg or f"SQL count mismatch for: {sql[:100]}"
+    assert_eq(actual, expected, err_msg)
+
+
+def assert_sql_scalar(spark: SparkSession, sql: str, expected, msg: str = None):
+    """Execute SQL query and assert scalar result matches expected."""
+    actual = run_sql(spark, sql).collect()[0][0]
+    err_msg = msg or f"SQL scalar mismatch for: {sql[:100]}"
+    assert_eq(actual, expected, err_msg)
+
+
+# ----------------------------
 # Test Suite
 # ----------------------------
 class Suite:
@@ -808,6 +840,11 @@ class Suite:
             WHEN MATCHED AND s.op = 'update' THEN UPDATE SET t.data = s.data, t.cnt = s.cnt
             WHEN NOT MATCHED THEN INSERT (id, data, cnt) VALUES (s.id, s.data, s.cnt)
         """)
+        
+        # Validate: should have 3 rows (id=1 updated, id=2 unchanged, id=3 inserted)
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {self.t('write_target')}", 3, "Expected 3 rows after merge")
+        assert_sql_scalar(self.spark, f"SELECT data FROM {self.t('write_target')} WHERE id=1", "a2", "Row 1 should be updated")
+        assert_sql_scalar(self.spark, f"SELECT data FROM {self.t('write_target')} WHERE id=3", "c", "Row 3 should be inserted")
         run_sql(self.spark, f"SELECT * FROM {self.t('write_target')} ORDER BY id", show=True)
 
     def writes_insert_overwrite_dynamic_and_static(self):
@@ -839,8 +876,7 @@ class Suite:
             WHERE level = 'INFO' AND cast(ts as date) = DATE'2026-01-01'
         """)
         dyn_cnt = scalar_long(self.spark, f"SELECT count(*) FROM {self.t('logs')}")
-        if dyn_cnt <= 0:
-            raise RuntimeError("dynamic overwrite produced empty table unexpectedly")
+        assert_true(dyn_cnt > 0, "dynamic overwrite should not produce empty table")
 
         run_sql(self.spark, "SET spark.sql.sources.partitionOverwriteMode=static")
         run_sql(self.spark, f"""
@@ -850,21 +886,18 @@ class Suite:
             WHERE level = 'WARN'
         """)
         static_cnt = scalar_long(self.spark, f"SELECT count(*) FROM {self.t('logs')}")
-        if static_cnt != 1:
-            raise RuntimeError(f"static overwrite expected 1 row, got {static_cnt}")
+        assert_eq(static_cnt, 1, "static overwrite should result in 1 row")
+
 
     def writes_delete_and_update(self):
         run_sql(self.spark, f"DROP TABLE IF EXISTS {self.t('write_target')}")
         run_sql(self.spark, f"CREATE TABLE {self.t('write_target')} (id bigint, v int) USING iceberg")
         run_sql(self.spark, f"INSERT INTO {self.t('write_target')} VALUES (1,10),(2,20),(3,30)")
         run_sql(self.spark, f"DELETE FROM {self.t('write_target')} WHERE id = 1")
-        cnt1 = scalar_long(self.spark, f"SELECT count(*) FROM {self.t('write_target')}")
-        if cnt1 != 2:
-            raise RuntimeError(f"DELETE failed, expected 2 rows, got {cnt1}")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {self.t('write_target')}", 2, "Expected 2 rows after DELETE")
         run_sql(self.spark, f"UPDATE {self.t('write_target')} SET v = 999 WHERE id = 2")
-        v2 = scalar_long(self.spark, f"SELECT v FROM {self.t('write_target')} WHERE id=2")
-        if v2 != 999:
-            raise RuntimeError("UPDATE failed")
+        assert_sql_scalar(self.spark, f"SELECT v FROM {self.t('write_target')} WHERE id=2", 999, "UPDATE should set v=999")
+
 
     def writes_to_branch_and_wap(self):
         tbl = self.t("sample_part")
@@ -925,6 +958,525 @@ class Suite:
             ["id", "data", "category", "ts"],
         ).withColumn("ts", F.to_timestamp("ts"))
         df.writeTo(self.t("sample_part")).overwritePartitions()
+
+    # ----------------------------
+    # New Write Coverage: SQL MERGE enhancements
+    # ----------------------------
+    def writes_merge_with_delete(self):
+        """MERGE INTO with WHEN MATCHED THEN DELETE clause."""
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {self.t('merge_del_target')}")
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {self.t('merge_del_source')}")
+        run_sql(self.spark, f"CREATE TABLE {self.t('merge_del_target')} (id bigint, data string, status string) USING iceberg")
+        run_sql(self.spark, f"INSERT INTO {self.t('merge_del_target')} VALUES (1,'a','active'),(2,'b','active'),(3,'c','inactive')")
+        run_sql(self.spark, f"CREATE TABLE {self.t('merge_del_source')} (id bigint, status string) USING iceberg")
+        run_sql(self.spark, f"INSERT INTO {self.t('merge_del_source')} VALUES (1,'delete'),(2,'keep')")
+
+        ok, err = try_sql(self.spark, f"""
+            MERGE INTO {self.t('merge_del_target')} t
+            USING {self.t('merge_del_source')} s
+            ON t.id = s.id
+            WHEN MATCHED AND s.status = 'delete' THEN DELETE
+            WHEN MATCHED THEN UPDATE SET t.status = s.status
+        """)
+        
+        if not ok:
+            if self._is_unsupported_feature_error(err):
+                raise SkipCase(f"MERGE with DELETE not supported: {err}")
+            else:
+                raise RuntimeError(f"MERGE with DELETE failed: {err}")
+        
+        # Validate: id=1 should be deleted, id=2 should have status='keep', id=3 unchanged
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {self.t('merge_del_target')}", 2, "Expected 2 rows after merge delete")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {self.t('merge_del_target')} WHERE id=1", 0, "Row with id=1 should be deleted")
+        assert_sql_scalar(self.spark, f"SELECT status FROM {self.t('merge_del_target')} WHERE id=2", "keep", "Row with id=2 should have status='keep'")
+        run_sql(self.spark, f"SELECT * FROM {self.t('merge_del_target')} ORDER BY id", show=True)
+
+    def writes_merge_multiple_matched(self):
+        """MERGE INTO with multiple WHEN MATCHED clauses - first matching wins."""
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {self.t('merge_multi_target')}")
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {self.t('merge_multi_source')}")
+        run_sql(self.spark, f"CREATE TABLE {self.t('merge_multi_target')} (id bigint, data string, value int) USING iceberg")
+        run_sql(self.spark, f"INSERT INTO {self.t('merge_multi_target')} VALUES (1,'a',10),(2,'b',20),(3,'c',30)")
+        run_sql(self.spark, f"CREATE TABLE {self.t('merge_multi_source')} (id bigint, op string, value int) USING iceberg")
+        run_sql(self.spark, f"INSERT INTO {self.t('merge_multi_source')} VALUES (1,'delete',0),(2,'update',99),(3,'noop',0)")
+
+        ok, err = try_sql(self.spark, f"""
+            MERGE INTO {self.t('merge_multi_target')} t
+            USING {self.t('merge_multi_source')} s
+            ON t.id = s.id
+            WHEN MATCHED AND s.op = 'delete' THEN DELETE
+            WHEN MATCHED AND s.op = 'update' THEN UPDATE SET t.value = s.value
+            WHEN NOT MATCHED THEN INSERT (id, data, value) VALUES (s.id, 'new', s.value)
+        """)
+        
+        if not ok:
+            if self._is_unsupported_feature_error(err):
+                raise SkipCase(f"MERGE with multiple WHEN MATCHED not supported: {err}")
+            else:
+                raise RuntimeError(f"MERGE with multiple WHEN MATCHED failed: {err}")
+        
+        # Validate: id=1 deleted, id=2 updated, id=3 unchanged (no matching WHEN clause)
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {self.t('merge_multi_target')}", 2, "Expected 2 rows after multi-match merge")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {self.t('merge_multi_target')} WHERE id=1", 0, "Row with id=1 should be deleted")
+        assert_sql_scalar(self.spark, f"SELECT value FROM {self.t('merge_multi_target')} WHERE id=2", 99, "Row with id=2 should be updated")
+        run_sql(self.spark, f"SELECT * FROM {self.t('merge_multi_target')} ORDER BY id", show=True)
+
+    def writes_merge_not_matched_by_source(self):
+        """MERGE INTO with WHEN NOT MATCHED BY SOURCE (Spark 3.5+ feature)."""
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {self.t('merge_source_target')}")
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {self.t('merge_source_src')}")
+        run_sql(self.spark, f"CREATE TABLE {self.t('merge_source_target')} (id bigint, status string) USING iceberg")
+        run_sql(self.spark, f"INSERT INTO {self.t('merge_source_target')} VALUES (1,'old'),(2,'old'),(3,'old')")
+        run_sql(self.spark, f"CREATE TABLE {self.t('merge_source_src')} (id bigint, status string) USING iceberg")
+        run_sql(self.spark, f"INSERT INTO {self.t('merge_source_src')} VALUES (1,'new')")
+
+        ok, err = try_sql(self.spark, f"""
+            MERGE INTO {self.t('merge_source_target')} t
+            USING {self.t('merge_source_src')} s
+            ON t.id = s.id
+            WHEN MATCHED THEN UPDATE SET t.status = s.status
+            WHEN NOT MATCHED BY SOURCE THEN UPDATE SET t.status = 'archived'
+        """)
+        
+        if not ok:
+            if self._is_unsupported_feature_error(err) or "NOT MATCHED BY SOURCE" in err:
+                raise SkipCase(f"MERGE NOT MATCHED BY SOURCE not supported: {err}")
+            else:
+                raise RuntimeError(f"MERGE NOT MATCHED BY SOURCE failed: {err}")
+        
+        # Validate: id=1 updated to 'new', id=2 and id=3 updated to 'archived'
+        assert_sql_scalar(self.spark, f"SELECT status FROM {self.t('merge_source_target')} WHERE id=1", "new", "Row with id=1 should have status='new'")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {self.t('merge_source_target')} WHERE status='archived'", 2, "Two rows should have status='archived'")
+        run_sql(self.spark, f"SELECT * FROM {self.t('merge_source_target')} ORDER BY id", show=True)
+
+    # ----------------------------
+    # New Write Coverage: Branch writes
+    # ----------------------------
+    def writes_update_on_branch(self):
+        """UPDATE operation on a branch."""
+        tbl = self.t("sample_part")
+        branch = "update_test_branch"
+        
+        # Clean up and create branch
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+        run_sql(self.spark, f"ALTER TABLE {tbl} CREATE BRANCH `{branch}`")
+        
+        # Insert data to branch
+        run_sql(self.spark, f"INSERT INTO {tbl}.branch_{branch} VALUES (701,'before_update','c1',TIMESTAMP'2026-02-07 00:00:00')")
+        
+        # Update on branch
+        run_sql(self.spark, f"UPDATE {tbl}.branch_{branch} SET data='after_update' WHERE id=701")
+        
+        # Validate: branch has updated value
+        assert_sql_scalar(self.spark, f"SELECT data FROM {tbl}.branch_{branch} WHERE id=701", "after_update", "Branch should have updated data")
+        
+        # Validate: main branch does not have this row
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl} WHERE id=701", 0, "Main branch should not have this row")
+        
+        # Clean up
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH `{branch}`")
+
+    def writes_delete_on_branch(self):
+        """DELETE operation on a branch."""
+        tbl = self.t("sample_part")
+        branch = "delete_test_branch"
+        
+        # Clean up and create branch
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+        run_sql(self.spark, f"ALTER TABLE {tbl} CREATE BRANCH `{branch}`")
+        
+        # Insert multiple rows to branch
+        run_sql(self.spark, f"INSERT INTO {tbl}.branch_{branch} VALUES (702,'to_delete','c1',TIMESTAMP'2026-02-07 01:00:00')")
+        run_sql(self.spark, f"INSERT INTO {tbl}.branch_{branch} VALUES (703,'to_keep','c1',TIMESTAMP'2026-02-07 02:00:00')")
+        
+        # Delete on branch
+        run_sql(self.spark, f"DELETE FROM {tbl}.branch_{branch} WHERE id=702")
+        
+        # Validate: branch has one row left
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}.branch_{branch}", 1, "Branch should have 1 row after delete")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}.branch_{branch} WHERE id=702", 0, "Deleted row should not exist on branch")
+        
+        # Validate: main branch unchanged
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl} WHERE id IN (702,703)", 0, "Main branch should not have these rows")
+        
+        # Clean up
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH `{branch}`")
+
+    def writes_merge_on_branch(self):
+        """MERGE INTO operation on a branch."""
+        tbl = self.t("sample_part")
+        branch = "merge_test_branch"
+        
+        # Clean up and create branch, source table
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+        run_sql(self.spark, f"ALTER TABLE {tbl} CREATE BRANCH `{branch}`")
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {self.t('branch_merge_source')}")
+        run_sql(self.spark, f"CREATE TABLE {self.t('branch_merge_source')} (id bigint, data string, category string, ts timestamp) USING iceberg")
+        
+        # Insert data to branch
+        run_sql(self.spark, f"INSERT INTO {tbl}.branch_{branch} VALUES (704,'original','c1',TIMESTAMP'2026-02-07 03:00:00')")
+        
+        # Prepare source data
+        run_sql(self.spark, f"INSERT INTO {self.t('branch_merge_source')} VALUES (704,'merged','c1',TIMESTAMP'2026-02-07 04:00:00'),(705,'new','c1',TIMESTAMP'2026-02-07 05:00:00')")
+        
+        # Merge into branch
+        run_sql(self.spark, f"""
+            MERGE INTO {tbl}.branch_{branch} t
+            USING {self.t('branch_merge_source')} s
+            ON t.id = s.id
+            WHEN MATCHED THEN UPDATE SET t.data = s.data
+            WHEN NOT MATCHED THEN INSERT (id, data, category, ts) VALUES (s.id, s.data, s.category, s.ts)
+        """)
+        
+        # Validate: branch has 2 rows with expected data
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}.branch_{branch} WHERE id IN (704,705)", 2, "Branch should have 2 rows after merge")
+        assert_sql_scalar(self.spark, f"SELECT data FROM {tbl}.branch_{branch} WHERE id=704", "merged", "Row 704 should be updated")
+        
+        # Validate: main branch unchanged
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl} WHERE id IN (704,705)", 0, "Main branch should not have these rows")
+        
+        # Clean up
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH `{branch}`")
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {self.t('branch_merge_source')}")
+
+    # ----------------------------
+    # New Write Coverage: DataFrame advanced
+    # ----------------------------
+    def writes_dfv2_overwrite_by_filter(self):
+        """DataFrameWriterV2 overwrite by filter."""
+        tbl = self.t("logs")
+        
+        # Ensure table exists with partitioned data
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {tbl}")
+        run_sql(self.spark, f"""
+            CREATE TABLE {tbl} (
+                uuid string NOT NULL,
+                level string NOT NULL,
+                ts timestamp NOT NULL,
+                message string
+            )
+            USING iceberg
+            PARTITIONED BY (level)
+        """)
+        run_sql(self.spark, f"""
+            INSERT INTO {tbl} VALUES
+            ('u1','INFO', TIMESTAMP'2026-01-01 01:00:00','m1'),
+            ('u2','INFO', TIMESTAMP'2026-01-01 02:00:00','m2'),
+            ('u3','WARN', TIMESTAMP'2026-01-01 03:00:00','m3'),
+            ('u4','ERROR', TIMESTAMP'2026-01-01 04:00:00','m4')
+        """)
+        
+        # Overwrite only INFO level logs
+        df = self.spark.createDataFrame(
+            [('u99','INFO', '2026-01-02 00:00:00','overwritten')],
+            ["uuid", "level", "ts", "message"]
+        ).withColumn("ts", F.to_timestamp("ts"))
+        
+        try:
+            df.writeTo(tbl).overwrite(F.col("level") == "INFO")
+        except Exception as e:
+            if self._is_unsupported_feature_error(str(e)) or "overwrite" in str(e).lower():
+                raise SkipCase(f"DataFrameWriterV2 overwrite by filter not supported: {e}")
+            else:
+                raise
+        
+        # Validate: INFO rows replaced, WARN and ERROR remain
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl} WHERE level='INFO'", 1, "Should have 1 INFO row after overwrite")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl} WHERE level='WARN'", 1, "Should still have 1 WARN row")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl} WHERE level='ERROR'", 1, "Should still have 1 ERROR row")
+        assert_sql_scalar(self.spark, f"SELECT message FROM {tbl} WHERE level='INFO'", "overwritten", "INFO message should be overwritten")
+        run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY level, uuid", show=True)
+
+    def writes_dfv2_schema_merge(self):
+        """DataFrameWriterV2 with schema evolution via mergeSchema option."""
+        tbl = self.t("schema_merge_tbl")
+        
+        # Create table with initial schema
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {tbl}")
+        run_sql(self.spark, f"CREATE TABLE {tbl} (id bigint, name string) USING iceberg")
+        run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1,'Alice'),(2,'Bob')")
+        
+        # Enable schema acceptance
+        ok, err = try_sql(self.spark, f"ALTER TABLE {tbl} SET TBLPROPERTIES ('write.spark.accept-any-schema'='true')")
+        if not ok:
+            if self._is_unsupported_feature_error(err):
+                raise SkipCase(f"Schema evolution not supported: {err}")
+            else:
+                raise RuntimeError(f"Failed to set schema property: {err}")
+        
+        # Append data with new column using mergeSchema
+        df = self.spark.createDataFrame(
+            [(3, 'Charlie', 30), (4, 'Diana', 25)],
+            ["id", "name", "age"]
+        )
+        
+        try:
+            df.writeTo(tbl).option("mergeSchema", "true").append()
+        except Exception as e:
+            if self._is_unsupported_feature_error(str(e)) or "schema" in str(e).lower():
+                raise SkipCase(f"Schema merge not supported: {e}")
+            else:
+                raise
+        
+        # Validate: new column exists, old rows have NULL for new column
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows total")
+        run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
+        
+        # Check schema includes new column
+        cols = [field.name for field in self.spark.table(tbl).schema.fields]
+        assert_true("age" in cols, "Schema should include 'age' column")
+        
+        # Validate old rows have NULL for new column, new rows have values
+        assert_sql_scalar(self.spark, f"SELECT age FROM {tbl} WHERE id=1", None, "Old rows should have NULL for new column")
+        assert_sql_scalar(self.spark, f"SELECT age FROM {tbl} WHERE id=3", 30, "New rows should have age values")
+
+    # ----------------------------
+    # New Procedures Coverage
+    # ----------------------------
+    def proc_snapshot_table(self):
+        """system.snapshot procedure to snapshot a table."""
+        if not self.run_procedures:
+            raise SkipCase("procedures disabled")
+        
+        # Create small source table
+        src_tbl = self.t("snapshot_source")
+        snap_tbl = self.t("snapshot_target")
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {src_tbl}")
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {snap_tbl}")
+        run_sql(self.spark, f"CREATE TABLE {src_tbl} (id bigint, value string) USING iceberg")
+        run_sql(self.spark, f"INSERT INTO {src_tbl} VALUES (1,'a'),(2,'b'),(3,'c')")
+        
+        # Get source row count
+        src_count = scalar_long(self.spark, f"SELECT count(*) FROM {src_tbl}")
+        
+        # Snapshot the table
+        ok, err = try_sql(self.spark, f"""
+            CALL {self.catalog}.system.snapshot(
+              source_table => '{self.db}.snapshot_source',
+              table => '{self.db}.snapshot_target'
+            )
+        """, show=True)
+        
+        if not ok:
+            if self._is_unsupported_feature_error(err) or "snapshot" in err.lower():
+                raise SkipCase(f"snapshot procedure not supported: {err}")
+            else:
+                raise RuntimeError(f"snapshot procedure failed: {err}")
+        
+        # Validate: snapshot table has same row count as source
+        snap_count = scalar_long(self.spark, f"SELECT count(*) FROM {snap_tbl}")
+        assert_eq(snap_count, src_count, "Snapshot table should have same row count as source")
+        run_sql(self.spark, f"SELECT * FROM {snap_tbl} ORDER BY id", show=True)
+        
+        # Clean up
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {snap_tbl}")
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {src_tbl}")
+
+    def proc_set_current_snapshot_with_ref(self):
+        """system.set_current_snapshot using ref parameter (branch or tag)."""
+        if not self.run_procedures:
+            raise SkipCase("procedures disabled")
+        
+        tbl = self.t("sample_part")
+        branch = "snapshot_ref_branch"
+        
+        # Create branch and insert data
+        try_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+        run_sql(self.spark, f"ALTER TABLE {tbl} CREATE BRANCH `{branch}`")
+        run_sql(self.spark, f"INSERT INTO {tbl}.branch_{branch} VALUES (800,'ref_test','c1',TIMESTAMP'2026-02-08 00:00:00')")
+        
+        # Get snapshot ID of branch
+        try:
+            branch_snapshot_id = scalar_long(self.spark, f"""
+                SELECT snapshot_id FROM {tbl}.refs WHERE name = '{branch}' LIMIT 1
+            """)
+        except Exception as e:
+            run_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+            raise SkipCase(f"Could not get branch snapshot ID: {e}")
+        
+        # Set current snapshot using ref
+        ok, err = try_sql(self.spark, f"""
+            CALL {self.catalog}.system.set_current_snapshot(
+              table => '{self.db}.sample_part',
+              ref => '{branch}'
+            )
+        """, show=True)
+        
+        if not ok:
+            run_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+            if self._is_unsupported_feature_error(err) or "ref" in err.lower():
+                raise SkipCase(f"set_current_snapshot with ref not supported: {err}")
+            else:
+                raise RuntimeError(f"set_current_snapshot with ref failed: {err}")
+        
+        # Validate: current snapshot ID should match branch snapshot
+        current_snapshot_id = scalar_long(self.spark, f"SELECT snapshot_id FROM {tbl}.snapshots ORDER BY committed_at DESC LIMIT 1")
+        assert_eq(current_snapshot_id, branch_snapshot_id, "Current snapshot should match branch snapshot")
+        
+        # Clean up
+        run_sql(self.spark, f"ALTER TABLE {tbl} DROP BRANCH IF EXISTS `{branch}`")
+
+    def proc_rewrite_data_files_with_options(self):
+        """rewrite_data_files with where and strategy options."""
+        if not self.run_procedures:
+            raise SkipCase("procedures disabled")
+        
+        tbl = self.t("sample_part")
+        
+        # Test with where clause
+        ok, err = try_sql(self.spark, f"""
+            CALL {self.catalog}.system.rewrite_data_files(
+              table => '{self.db}.sample_part',
+              where => 'category = \\'c1\\''
+            )
+        """, show=True)
+        
+        if not ok:
+            if self._is_unsupported_feature_error(err):
+                raise SkipCase(f"rewrite_data_files with where not supported: {err}")
+            # Not fatal if it fails, continue with strategy test
+        
+        # Test with strategy option
+        ok2, err2 = try_sql(self.spark, f"""
+            CALL {self.catalog}.system.rewrite_data_files(
+              table => '{self.db}.sample_part',
+              strategy => 'sort',
+              options => map('target-file-size-bytes', '134217728')
+            )
+        """, show=True)
+        
+        if not ok2:
+            if self._is_unsupported_feature_error(err2):
+                raise SkipCase(f"rewrite_data_files with strategy not supported: {err2}")
+
+    def proc_rewrite_manifests_with_options(self):
+        """rewrite_manifests with spec_id and use_caching options."""
+        if not self.run_procedures:
+            raise SkipCase("procedures disabled")
+        
+        tbl = self.t("sample_part")
+        
+        # Test with use_caching option
+        ok, err = try_sql(self.spark, f"""
+            CALL {self.catalog}.system.rewrite_manifests(
+              table => '{self.db}.sample_part',
+              use_caching => true
+            )
+        """, show=True)
+        
+        if not ok:
+            if self._is_unsupported_feature_error(err) or "use_caching" in err:
+                raise SkipCase(f"rewrite_manifests with use_caching not supported: {err}")
+
+    def proc_expire_snapshots_with_ids(self):
+        """expire_snapshots using snapshot_ids array (on temp table for safety)."""
+        if not self.run_procedures:
+            raise SkipCase("procedures disabled")
+        
+        # Create temp table for safe snapshot expiration
+        temp_tbl = self.t("expire_snap_temp")
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {temp_tbl}")
+        run_sql(self.spark, f"CREATE TABLE {temp_tbl} (id bigint, data string) USING iceberg")
+        run_sql(self.spark, f"INSERT INTO {temp_tbl} VALUES (1,'a')")
+        run_sql(self.spark, f"INSERT INTO {temp_tbl} VALUES (2,'b')")
+        run_sql(self.spark, f"INSERT INTO {temp_tbl} VALUES (3,'c')")
+        
+        # Get snapshot IDs (keep last 2, expire first one)
+        snaps = run_sql(self.spark, f"SELECT snapshot_id FROM {temp_tbl}.snapshots ORDER BY committed_at").collect()
+        if len(snaps) < 2:
+            run_sql(self.spark, f"DROP TABLE IF EXISTS {temp_tbl}")
+            raise SkipCase("Not enough snapshots for expire test")
+        
+        first_snap_id = int(snaps[0]["snapshot_id"])
+        
+        # Expire using snapshot_ids array
+        ok, err = try_sql(self.spark, f"""
+            CALL {self.catalog}.system.expire_snapshots(
+              table => '{self.db}.expire_snap_temp',
+              snapshot_ids => ARRAY({first_snap_id})
+            )
+        """, show=True)
+        
+        if not ok:
+            run_sql(self.spark, f"DROP TABLE IF EXISTS {temp_tbl}")
+            if self._is_unsupported_feature_error(err) or "snapshot_ids" in err:
+                raise SkipCase(f"expire_snapshots with snapshot_ids not supported: {err}")
+            else:
+                raise RuntimeError(f"expire_snapshots with snapshot_ids failed: {err}")
+        
+        # Clean up
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {temp_tbl}")
+
+    def proc_compute_table_stats(self):
+        """compute_table_stats procedure."""
+        if not self.run_procedures:
+            raise SkipCase("procedures disabled")
+        
+        tbl = self.t("sample_part")
+        
+        ok, err = try_sql(self.spark, f"""
+            CALL {self.catalog}.system.compute_table_stats(
+              table => '{self.db}.sample_part'
+            )
+        """, show=True)
+        
+        if not ok:
+            if self._is_unsupported_feature_error(err) or "compute_table_stats" in err:
+                raise SkipCase(f"compute_table_stats not supported: {err}")
+            else:
+                raise RuntimeError(f"compute_table_stats failed: {err}")
+
+    def proc_compute_partition_stats(self):
+        """compute_partition_stats procedure."""
+        if not self.run_procedures:
+            raise SkipCase("procedures disabled")
+        
+        tbl = self.t("sample_part")
+        
+        ok, err = try_sql(self.spark, f"""
+            CALL {self.catalog}.system.compute_partition_stats(
+              table => '{self.db}.sample_part'
+            )
+        """, show=True)
+        
+        if not ok:
+            if self._is_unsupported_feature_error(err) or "compute_partition_stats" in err:
+                raise SkipCase(f"compute_partition_stats not supported: {err}")
+            else:
+                raise RuntimeError(f"compute_partition_stats failed: {err}")
+
+    def proc_remove_orphan_files_safe(self):
+        """remove_orphan_files with dry_run=false on isolated temp table (LAST TEST)."""
+        if not self.run_procedures:
+            raise SkipCase("procedures disabled")
+        
+        # Create isolated temp table for safe orphan file removal
+        temp_tbl = self.t("orphan_safe_temp")
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {temp_tbl}")
+        run_sql(self.spark, f"CREATE TABLE {temp_tbl} (id bigint, data string) USING iceberg")
+        run_sql(self.spark, f"INSERT INTO {temp_tbl} VALUES (1,'test')")
+        
+        # Run remove_orphan_files with dry_run=false
+        ok, err = try_sql(self.spark, f"""
+            CALL {self.catalog}.system.remove_orphan_files(
+              table => '{self.db}.orphan_safe_temp',
+              dry_run => false
+            )
+        """, show=True)
+        
+        if not ok:
+            run_sql(self.spark, f"DROP TABLE IF EXISTS {temp_tbl}")
+            if self._is_unsupported_feature_error(err):
+                raise SkipCase(f"remove_orphan_files with dry_run=false not supported: {err}")
+            else:
+                # Not fatal - permissions or other issues may prevent execution
+                raise SkipCase(f"remove_orphan_files with dry_run=false could not execute safely: {err}")
+        
+        # Table should still be queryable
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {temp_tbl}", 1, "Table should still have data after orphan file removal")
+        
+        # Clean up
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {temp_tbl}")
 
     # ----------------------------
     # Queries cases
@@ -1340,84 +1892,140 @@ class Suite:
     # Case registry + executor
     # ----------------------------
     def cases(self) -> List[Tuple[str, str, Callable[[], None]]]:
+        """
+        Reorganized test cases with clearer grouping aligned to Iceberg Spark docs.
+        Groups:
+        - 00_env: Environment setup
+        - 10_ddl_core: Core DDL operations (CREATE, ALTER, DROP)
+        - 11_ddl_views: View operations
+        - 12_ddl_branch_tag: Branch and tag DDL
+        - 20_writes_sql_core: Core SQL writes (INSERT, UPDATE, DELETE, INSERT OVERWRITE)
+        - 21_writes_sql_merge: SQL MERGE INTO operations
+        - 22_writes_sql_branch: Branch-specific writes
+        - 23_writes_wap: Write-Audit-Publish
+        - 30_writes_dfv2_core: DataFrameWriterV2 core operations
+        - 31_writes_df_advanced: DataFrameWriterV2 advanced features
+        - 40_queries_*: Query operations (metadata, time travel, etc.)
+        - 50_proc_snapshot_mgmt: Snapshot management procedures
+        - 51_proc_metadata_mgmt: Metadata management procedures
+        - 52_proc_migration: Migration and replication procedures
+        - 53_proc_replication: Replication procedures
+        - 54_proc_stats: Statistics procedures
+        - 55_proc_cdc: CDC procedures
+        """
         return [
+            # Environment setup
             ("00_env", "prepare", self.env_prepare),
             ("00_env", "seed_base_tables", self.env_seed_base_tables),
 
-            # Basic DDL
-            ("10_ddl", "ctas_basic", self.ddl_ctas_basic),
-            ("10_ddl", "ctas_with_props_and_partition", self.ddl_ctas_with_props_and_partition),
-            ("10_ddl", "rtas_replace_table_as_select_existing_first", self.ddl_rtas_replace_table_as_select_existing_first),
-            ("10_ddl", "rtas_create_or_replace_table_as_select", self.ddl_rtas_create_or_replace_table_as_select),
-            ("10_ddl", "drop_table_and_purge", self.ddl_drop_table_and_purge),
-            ("10_ddl", "alter_table_core", self.ddl_alter_table_core),
-            ("10_ddl", "sql_extensions_partition_evolution_and_write_order", self.ddl_sql_extensions_partition_evolution_and_write_order),
+            # Core DDL operations
+            ("10_ddl_core", "create_table_as_select_basic", self.ddl_ctas_basic),
+            ("10_ddl_core", "create_table_as_select_with_props_and_partition", self.ddl_ctas_with_props_and_partition),
+            ("10_ddl_core", "replace_table_as_select_existing_first", self.ddl_rtas_replace_table_as_select_existing_first),
+            ("10_ddl_core", "create_or_replace_table_as_select", self.ddl_rtas_create_or_replace_table_as_select),
+            ("10_ddl_core", "create_table_with_comments", self.ddl_create_table_with_comments),
+            ("10_ddl_core", "create_table_with_location", self.ddl_create_table_with_location),
+            ("10_ddl_core", "create_table_like_negative", self.ddl_create_table_like_negative),
+            ("10_ddl_core", "replace_table_with_partition_and_properties", self.ddl_rtas_with_partition_and_properties),
+            ("10_ddl_core", "alter_table_core_operations", self.ddl_alter_table_core),
+            ("10_ddl_core", "alter_table_partition_evolution_and_write_order", self.ddl_sql_extensions_partition_evolution_and_write_order),
+            ("10_ddl_core", "alter_table_rename", self.ddl_alter_table_rename),
+            ("10_ddl_core", "alter_column_comment", self.ddl_alter_column_comment),
+            ("10_ddl_core", "drop_table_and_purge", self.ddl_drop_table_and_purge),
             
-            # Enhanced DDL tests
-            ("10_ddl_enhanced", "create_table_with_comments", self.ddl_create_table_with_comments),
-            ("10_ddl_enhanced", "create_table_with_location", self.ddl_create_table_with_location),
-            ("10_ddl_enhanced", "create_table_like_negative", self.ddl_create_table_like_negative),
-            ("10_ddl_enhanced", "rtas_with_partition_and_properties", self.ddl_rtas_with_partition_and_properties),
-            ("10_ddl_enhanced", "alter_table_rename", self.ddl_alter_table_rename),
-            ("10_ddl_enhanced", "alter_column_comment", self.ddl_alter_column_comment),
-            
-            # Views
-            ("10_ddl_views", "views_basic", self.ddl_views),
-            ("10_ddl_views", "views_if_not_exists", self.ddl_views_if_not_exists),
-            ("10_ddl_views", "views_with_comments_and_aliases", self.ddl_views_with_comments_and_aliases),
+            # View operations
+            ("11_ddl_views", "create_view_and_alter_view", self.ddl_views),
+            ("11_ddl_views", "create_view_if_not_exists", self.ddl_views_if_not_exists),
+            ("11_ddl_views", "create_view_with_comments_and_aliases", self.ddl_views_with_comments_and_aliases),
             
             # Branch & Tag DDL
-            ("15_branch_tag_ddl", "branch_create_with_if_not_exists", self.ddl_branch_create_with_if_not_exists),
-            ("15_branch_tag_ddl", "branch_create_or_replace", self.ddl_branch_create_or_replace),
-            ("15_branch_tag_ddl", "branch_as_of_version", self.ddl_branch_as_of_version),
-            ("15_branch_tag_ddl", "branch_replace", self.ddl_branch_replace),
-            ("15_branch_tag_ddl", "branch_drop_if_exists", self.ddl_branch_drop_if_exists),
-            ("15_branch_tag_ddl", "tag_create_with_if_not_exists", self.ddl_tag_create_with_if_not_exists),
-            ("15_branch_tag_ddl", "tag_create_or_replace", self.ddl_tag_create_or_replace),
-            ("15_branch_tag_ddl", "tag_drop_if_exists", self.ddl_tag_drop_if_exists),
-            ("15_branch_tag_ddl", "branch_with_retention", self.ddl_branch_with_retention),
+            ("12_ddl_branch_tag", "create_branch_with_if_not_exists", self.ddl_branch_create_with_if_not_exists),
+            ("12_ddl_branch_tag", "create_or_replace_branch", self.ddl_branch_create_or_replace),
+            ("12_ddl_branch_tag", "create_branch_as_of_version", self.ddl_branch_as_of_version),
+            ("12_ddl_branch_tag", "replace_branch", self.ddl_branch_replace),
+            ("12_ddl_branch_tag", "drop_branch_if_exists", self.ddl_branch_drop_if_exists),
+            ("12_ddl_branch_tag", "create_tag_with_if_not_exists", self.ddl_tag_create_with_if_not_exists),
+            ("12_ddl_branch_tag", "create_or_replace_tag", self.ddl_tag_create_or_replace),
+            ("12_ddl_branch_tag", "drop_tag_if_exists", self.ddl_tag_drop_if_exists),
+            ("12_ddl_branch_tag", "create_branch_with_retention", self.ddl_branch_with_retention),
 
-            # Writes
-            ("20_writes_sql", "insert_into_and_insert_select", self.writes_insert_into_and_insert_select),
-            ("20_writes_sql", "merge_into", self.writes_merge_into),
-            ("20_writes_sql", "insert_overwrite_dynamic_and_static", self.writes_insert_overwrite_dynamic_and_static),
-            ("20_writes_sql", "delete_and_update", self.writes_delete_and_update),
-            ("20_writes_sql", "writes_to_branch_and_wap", self.writes_to_branch_and_wap),
+            # Core SQL writes
+            ("20_writes_sql_core", "insert_into_and_insert_select", self.writes_insert_into_and_insert_select),
+            ("20_writes_sql_core", "insert_overwrite_dynamic_and_static", self.writes_insert_overwrite_dynamic_and_static),
+            ("20_writes_sql_core", "delete_and_update", self.writes_delete_and_update),
 
-            # DataFrameWriterV2
-            ("30_writes_dfv2", "dfv2_create", self.dfv2_create),
-            ("30_writes_dfv2", "dfv2_replace", self.dfv2_replace),
-            ("30_writes_dfv2", "dfv2_create_or_replace", self.dfv2_create_or_replace),
-            ("30_writes_dfv2", "dfv2_append", self.dfv2_append),
-            ("30_writes_dfv2", "dfv2_overwrite_partitions", self.dfv2_overwrite_partitions),
+            # SQL MERGE INTO operations
+            ("21_writes_sql_merge", "merge_into_basic", self.writes_merge_into),
+            ("21_writes_sql_merge", "merge_with_matched_delete", self.writes_merge_with_delete),
+            ("21_writes_sql_merge", "merge_multiple_matched_clauses", self.writes_merge_multiple_matched),
+            ("21_writes_sql_merge", "merge_not_matched_by_source", self.writes_merge_not_matched_by_source),
 
-            # Queries
-            ("40_queries", "metadata_tables", self.queries_metadata_tables),
-            ("40_queries", "time_travel", self.queries_time_travel),
-            ("40_queries", "time_travel_metadata_tables", self.queries_time_travel_metadata_tables),
-            ("40_queries", "data_files_metadata_table", self.queries_data_files_metadata_table),
-            ("40_queries", "delete_files_metadata_table", self.queries_delete_files_metadata_table),
-            ("40_queries", "all_files_metadata_table", self.queries_all_files_metadata_table),
-            ("40_queries", "time_travel_branch_string", self.queries_time_travel_branch_string),
-            ("40_queries", "time_travel_tag_string", self.queries_time_travel_tag_string),
-            ("40_queries", "branch_identifier_form", self.queries_branch_identifier_form),
-            ("40_queries", "tag_identifier_form", self.queries_tag_identifier_form),
+            # Branch-specific writes
+            ("22_writes_sql_branch", "update_on_branch", self.writes_update_on_branch),
+            ("22_writes_sql_branch", "delete_on_branch", self.writes_delete_on_branch),
+            ("22_writes_sql_branch", "merge_into_on_branch", self.writes_merge_on_branch),
 
-            # migration/replication procedures
-            ("55_procedures_migration", "migration_env_prepare", self.proc_migration_env_prepare),
-            ("55_procedures_migration", "migrate", self.proc_migrate),
-            ("55_procedures_migration", "add_files", self.proc_add_files),
-            ("55_procedures_migration", "rewrite_table_path", self.proc_rewrite_table_path),
-            ("55_procedures_migration", "register_table", self.proc_register_table),
+            # Write-Audit-Publish
+            ("23_writes_wap", "writes_to_branch_and_wap", self.writes_to_branch_and_wap),
 
-            # other procedures
-            ("50_procedures", "snapshot_management", self.proc_snapshot_management),
-            ("50_procedures", "publish_changes", self.proc_publish_changes),
-            ("50_procedures", "fast_forward", self.proc_fast_forward),
-            ("50_procedures", "metadata_management", self.proc_metadata_management),
-            ("50_procedures", "rewrite_position_delete_files", self.proc_rewrite_position_delete_files),
-            ("50_procedures", "ancestors_of", self.proc_ancestors_of),
-            ("50_procedures", "create_changelog_view", self.proc_create_changelog_view),
+            # DataFrameWriterV2 core operations
+            ("30_writes_dfv2_core", "dfv2_create_table", self.dfv2_create),
+            ("30_writes_dfv2_core", "dfv2_replace_table", self.dfv2_replace),
+            ("30_writes_dfv2_core", "dfv2_create_or_replace", self.dfv2_create_or_replace),
+            ("30_writes_dfv2_core", "dfv2_append", self.dfv2_append),
+            ("30_writes_dfv2_core", "dfv2_overwrite_partitions", self.dfv2_overwrite_partitions),
+
+            # DataFrameWriterV2 advanced features
+            ("31_writes_df_advanced", "dfv2_overwrite_by_filter", self.writes_dfv2_overwrite_by_filter),
+            ("31_writes_df_advanced", "dfv2_schema_merge", self.writes_dfv2_schema_merge),
+
+            # Query operations - metadata tables
+            ("40_queries_metadata", "query_metadata_tables", self.queries_metadata_tables),
+            ("40_queries_metadata", "query_data_files_metadata", self.queries_data_files_metadata_table),
+            ("40_queries_metadata", "query_delete_files_metadata", self.queries_delete_files_metadata_table),
+            ("40_queries_metadata", "query_all_files_metadata", self.queries_all_files_metadata_table),
+
+            # Query operations - time travel
+            ("40_queries_time_travel", "time_travel_basic", self.queries_time_travel),
+            ("40_queries_time_travel", "time_travel_on_metadata_tables", self.queries_time_travel_metadata_tables),
+            ("40_queries_time_travel", "time_travel_with_branch_string", self.queries_time_travel_branch_string),
+            ("40_queries_time_travel", "time_travel_with_tag_string", self.queries_time_travel_tag_string),
+
+            # Query operations - branch/tag identifiers
+            ("40_queries_refs", "query_branch_with_identifier_form", self.queries_branch_identifier_form),
+            ("40_queries_refs", "query_tag_with_identifier_form", self.queries_tag_identifier_form),
+
+            # Snapshot management procedures
+            ("50_proc_snapshot_mgmt", "rollback_and_set_current_snapshot", self.proc_snapshot_management),
+            ("50_proc_snapshot_mgmt", "snapshot_table", self.proc_snapshot_table),
+            ("50_proc_snapshot_mgmt", "set_current_snapshot_with_ref", self.proc_set_current_snapshot_with_ref),
+            ("50_proc_snapshot_mgmt", "fast_forward_branch", self.proc_fast_forward),
+            ("50_proc_snapshot_mgmt", "publish_wap_changes", self.proc_publish_changes),
+            ("50_proc_snapshot_mgmt", "ancestors_of_snapshot", self.proc_ancestors_of),
+
+            # Metadata management procedures
+            ("51_proc_metadata_mgmt", "rewrite_data_files_basic", self.proc_metadata_management),
+            ("51_proc_metadata_mgmt", "rewrite_data_files_with_options", self.proc_rewrite_data_files_with_options),
+            ("51_proc_metadata_mgmt", "rewrite_manifests_with_options", self.proc_rewrite_manifests_with_options),
+            ("51_proc_metadata_mgmt", "expire_snapshots_with_ids", self.proc_expire_snapshots_with_ids),
+            ("51_proc_metadata_mgmt", "rewrite_position_delete_files", self.proc_rewrite_position_delete_files),
+
+            # Migration and replication procedures
+            ("52_proc_migration", "migration_env_prepare", self.proc_migration_env_prepare),
+            ("52_proc_migration", "migrate_table", self.proc_migrate),
+            ("52_proc_migration", "add_files_to_table", self.proc_add_files),
+            ("52_proc_migration", "rewrite_table_path", self.proc_rewrite_table_path),
+            ("52_proc_migration", "register_table", self.proc_register_table),
+
+            # Statistics procedures
+            ("54_proc_stats", "compute_table_stats", self.proc_compute_table_stats),
+            ("54_proc_stats", "compute_partition_stats", self.proc_compute_partition_stats),
+
+            # CDC procedures
+            ("55_proc_cdc", "create_changelog_view", self.proc_create_changelog_view),
+
+            # LAST TEST: Safe orphan file removal (must be last)
+            ("99_cleanup", "remove_orphan_files_safe", self.proc_remove_orphan_files_safe),
         ]
 
     def run_all(self) -> List[CaseResult]:

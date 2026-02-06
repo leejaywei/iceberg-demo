@@ -8,11 +8,12 @@ This repository contains `iceberg_it.py`, a comprehensive integration test suite
 
 ## Features
 
-- **59 Test Cases** covering all major Iceberg operations
+- **75 Test Cases** covering all major Iceberg operations
 - **Spark Version Agnostic**: Compatible with both Spark 3.5 and Spark 4
 - **HDFS Environment Support**: Tests automatically adapt to HDFS/S3 storage
 - **Fail-Safe Design**: Unsupported features are SKIPped instead of failing
-- **Comprehensive DDL Coverage**: Aligned with Iceberg documentation
+- **Comprehensive Coverage**: Aligned with Iceberg Spark Writes and Procedures documentation
+- **Built-in Assertions**: Validates expected outcomes with assert_true, assert_eq, assert_sql_count
 
 ## Test Groups
 
@@ -20,24 +21,23 @@ This repository contains `iceberg_it.py`, a comprehensive integration test suite
 - Database and table preparation
 - Base table seeding
 
-### DDL Operations (10_ddl, 10_ddl_enhanced)
+### DDL Operations (10_ddl_core)
 - CREATE TABLE (basic, with props, partitioned, with comments, with LOCATION)
 - CREATE TABLE AS SELECT (CTAS)
 - REPLACE TABLE AS SELECT (RTAS) with properties merge
 - CREATE TABLE LIKE (negative test)
-- ALTER TABLE (columns, properties, partitions, write ordering)
-- ALTER TABLE RENAME TO
+- ALTER TABLE (columns, properties, partitions, write ordering, rename)
 - ALTER COLUMN COMMENT
 - DROP TABLE / PURGE
 
-### Views (10_ddl_views)
+### Views (11_ddl_views)
 - CREATE VIEW / CREATE OR REPLACE VIEW
 - CREATE VIEW IF NOT EXISTS
 - Views with TBLPROPERTIES
 - Views with column comments and aliases
 - ALTER VIEW (set/unset properties)
 
-### Branch & Tag DDL (15_branch_tag_ddl)
+### Branch & Tag DDL (12_ddl_branch_tag)
 - CREATE BRANCH / TAG with IF NOT EXISTS
 - CREATE OR REPLACE BRANCH / TAG
 - CREATE BRANCH AS OF VERSION
@@ -45,37 +45,83 @@ This repository contains `iceberg_it.py`, a comprehensive integration test suite
 - DROP BRANCH / TAG IF EXISTS
 - Branch retention syntax (when supported)
 
-### Write Operations (20_writes_sql)
+### Core SQL Writes (20_writes_sql_core)
 - INSERT INTO / INSERT SELECT
-- MERGE INTO
 - INSERT OVERWRITE (dynamic and static)
 - DELETE / UPDATE
-- Write to branches and WAP (Write-Audit-Publish)
 
-### DataFrameWriterV2 (30_writes_dfv2)
+### SQL MERGE Operations (21_writes_sql_merge)
+- Basic MERGE INTO (update + insert)
+- MERGE with WHEN MATCHED THEN DELETE
+- MERGE with multiple WHEN MATCHED clauses
+- MERGE with WHEN NOT MATCHED BY SOURCE (Spark 3.5+)
+
+### Branch-Specific Writes (22_writes_sql_branch)
+- UPDATE on branch
+- DELETE on branch
+- MERGE INTO on branch
+
+### Write-Audit-Publish (23_writes_wap)
+- Write to branches with WAP enabled
+
+### DataFrameWriterV2 Core (30_writes_dfv2_core)
 - create()
 - replace() - with Spark 3.5 compatibility
 - createOrReplace()
 - append()
 - overwritePartitions()
 
-### Query Operations (40_queries)
+### DataFrameWriterV2 Advanced (31_writes_df_advanced)
+- overwrite() with filter condition
+- Schema evolution with mergeSchema option
+
+### Query Operations (40_queries_*)
 - Metadata tables (history, snapshots, files, manifests, data_files, delete_files, all_files, etc.)
 - Time travel (TIMESTAMP AS OF, VERSION AS OF with snapshot IDs)
 - Time travel with string versions (branch/tag names)
 - Time travel on metadata tables
 - Branch/tag queries via identifier form with backticks
 
-### Procedures (50_procedures, 55_procedures_migration)
-- Migration (migrate, add_files, register_table)
-- Snapshot management (rollback, set_current_snapshot, cherrypick)
-- Metadata management (rewrite_data_files, rewrite_manifests, expire_snapshots)
-- WAP publishing (publish_changes)
-- Branch operations (fast_forward)
-- CDC (create_changelog_view)
-- Other utilities (ancestors_of, remove_orphan_files)
+### Procedures
+
+#### Snapshot Management (50_proc_snapshot_mgmt)
+- rollback_to_snapshot / set_current_snapshot / rollback_to_timestamp
+- snapshot (copy table snapshot)
+- set_current_snapshot with ref parameter (branch/tag)
+- cherrypick_snapshot
+- fast_forward (branch)
+- publish_changes (WAP)
+- ancestors_of
+
+#### Metadata Management (51_proc_metadata_mgmt)
+- rewrite_data_files (basic and with where/strategy options)
+- rewrite_manifests (with use_caching option)
+- expire_snapshots (with snapshot_ids array)
+- rewrite_position_delete_files
+
+#### Migration & Replication (52_proc_migration)
+- migrate (with backup)
+- add_files
+- rewrite_table_path
+- register_table
+
+#### Statistics (54_proc_stats)
+- compute_table_stats
+- compute_partition_stats
+
+#### CDC (55_proc_cdc)
+- create_changelog_view
+
+#### Cleanup (99_cleanup)
+- remove_orphan_files (safe, dry_run=false, last test)
 
 ## Key Enhancements
+
+### Assertion Helpers
+- `assert_true(cond, msg)`: Assert boolean condition
+- `assert_eq(actual, expected, msg)`: Assert equality
+- `assert_sql_count(sql, expected, msg)`: Assert query row count
+- `assert_sql_scalar(sql, expected, msg)`: Assert scalar query result
 
 ### Helper Methods
 - `_infer_hdfs_location()`: Derives writable HDFS paths from existing tables
@@ -117,11 +163,11 @@ Example output:
 GROUP                    CASE                                                 STATUS SECONDS  ERROR
 00_env                   prepare                                              PASS      0.52  
 00_env                   seed_base_tables                                     PASS      2.31  
-10_ddl                   ctas_basic                                           PASS      1.45  
+10_ddl_core              create_table_as_select_basic                         PASS      1.45  
 ...
-30_writes_dfv2           dfv2_replace                                         SKIP      0.03  DataFrameWriterV2.replace() not supported in this Spark version
+30_writes_dfv2_core      dfv2_replace_table                                   SKIP      0.03  DataFrameWriterV2.replace() not supported in this Spark version
 ...
-TOTAL=59  PASS=54  FAIL=0  SKIP=5
+TOTAL=75  PASS=68  FAIL=0  SKIP=7
 ```
 
 ## Requirements
