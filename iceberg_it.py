@@ -1243,7 +1243,7 @@ class Suite:
         snap_tbl = self.t("snapshot_target")
         run_sql(self.spark, f"DROP TABLE IF EXISTS {src_tbl}")
         run_sql(self.spark, f"DROP TABLE IF EXISTS {snap_tbl}")
-        run_sql(self.spark, f"CREATE TABLE {src_tbl} (id bigint, value string) USING iceberg TBLPROPERTIES ('format-version'='1')")
+        run_sql(self.spark, f"CREATE TABLE {src_tbl} (id bigint, value string) USING parquet")
         run_sql(self.spark, f"INSERT INTO {src_tbl} VALUES (1,'a'),(2,'b'),(3,'c')")
         
         # Get source row count
