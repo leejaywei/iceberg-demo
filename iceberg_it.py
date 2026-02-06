@@ -452,7 +452,7 @@ class Suite:
             USING iceberg
             PARTITIONED BY (category)
             TBLPROPERTIES ('new_prop'='new_value', 'common_prop'='updated')
-            AS SELECT id, data, category FROM {self.t('sample_unpart')} WHERE id > 0
+            AS SELECT id, data, category FROM {self.t('sample_part')} WHERE id > 0
         """)
         
         # Check the result
@@ -653,7 +653,7 @@ class Suite:
         """)
         
         # Get snapshot before replace
-        old_snapshot = self._get_latest_snapshot_id(f"{tbl}.branch_{branch}")
+        old_snapshot = self._get_latest_snapshot_id(tbl)
         
         # Now replace the branch (resets it)
         ok, err = try_sql(self.spark, f"ALTER TABLE {tbl} REPLACE BRANCH `{branch}`")
