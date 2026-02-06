@@ -8,7 +8,7 @@ This repository contains `iceberg_it.py`, a comprehensive integration test suite
 
 ## Features
 
-- **53 Test Cases** covering all major Iceberg operations
+- **59 Test Cases** covering all major Iceberg operations
 - **Spark Version Agnostic**: Compatible with both Spark 3.5 and Spark 4
 - **HDFS Environment Support**: Tests automatically adapt to HDFS/S3 storage
 - **Fail-Safe Design**: Unsupported features are SKIPped instead of failing
@@ -60,9 +60,11 @@ This repository contains `iceberg_it.py`, a comprehensive integration test suite
 - overwritePartitions()
 
 ### Query Operations (40_queries)
-- Metadata tables (history, snapshots, files, manifests, etc.)
-- Time travel (TIMESTAMP AS OF, VERSION AS OF)
+- Metadata tables (history, snapshots, files, manifests, data_files, delete_files, all_files, etc.)
+- Time travel (TIMESTAMP AS OF, VERSION AS OF with snapshot IDs)
+- Time travel with string versions (branch/tag names)
 - Time travel on metadata tables
+- Branch/tag queries via identifier form with backticks
 
 ### Procedures (50_procedures, 55_procedures_migration)
 - Migration (migrate, add_files, register_table)
@@ -119,7 +121,7 @@ GROUP                    CASE                                                 ST
 ...
 30_writes_dfv2           dfv2_replace                                         SKIP      0.03  DataFrameWriterV2.replace() not supported in this Spark version
 ...
-TOTAL=53  PASS=48  FAIL=0  SKIP=5
+TOTAL=59  PASS=54  FAIL=0  SKIP=5
 ```
 
 ## Requirements
