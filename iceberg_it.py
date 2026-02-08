@@ -2037,8 +2037,9 @@ class Suite:
         Run all test cases, optionally filtered by group and/or case name.
         
         Args:
-            group_filter: If specified, only run tests in this group (e.g., "10_ddl_core")
-            case_filter: If specified, only run tests with this case name (e.g., "create_table_as_select_basic")
+            group_filter: If specified, only run tests in this group (exact match, e.g., "10_ddl_core")
+            case_filter: If specified, only run tests with this case name (case-insensitive partial match, 
+                        e.g., "merge" matches "merge_into_basic", "merge_with_matched_delete", etc.)
         """
         results: List[CaseResult] = []
         all_cases = self.cases()
