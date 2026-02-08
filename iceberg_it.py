@@ -2048,7 +2048,7 @@ class Suite:
         for group, name, fn in all_cases:
             if group_filter and group != group_filter:
                 continue
-            if case_filter and case_filter not in name:
+            if case_filter and case_filter.lower() not in name.lower():
                 continue
             filtered_cases.append((group, name, fn))
         
