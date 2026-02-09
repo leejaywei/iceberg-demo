@@ -2290,7 +2290,7 @@ class Suite:
 
         run_sql(self.spark, f"""
             CALL {self.catalog}.system.create_changelog_view(
-              table => 'cdc_tbl',
+              table => '{self.db}.cdc_tbl',
               changelog_view => 'cdc_changes',
               options => map('start-snapshot-id','{start_sid}','end-snapshot-id','{end_sid}'),
               identifier_columns => array('id')
