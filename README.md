@@ -8,7 +8,7 @@ This repository contains `iceberg_it.py`, a comprehensive integration test suite
 
 ## Features
 
-- **75 Test Cases** covering all major Iceberg operations
+- **96 Test Cases** covering all major Iceberg operations including comprehensive data type testing
 - **Spark Version Agnostic**: Compatible with both Spark 3.5 and Spark 4
 - **HDFS Environment Support**: Tests automatically adapt to HDFS/S3 storage
 - **Fail-Safe Design**: Unsupported features are SKIPped instead of failing
@@ -44,6 +44,19 @@ This repository contains `iceberg_it.py`, a comprehensive integration test suite
 - REPLACE BRANCH / TAG
 - DROP BRANCH / TAG IF EXISTS
 - Branch retention syntax (when supported)
+
+### Data Type Tests (15_ddl_data_types)
+- Boolean, Byte (tinyint), Short (smallint), Integer, Long (bigint)
+- Float, Double, Decimal with precision and scale
+- Date, Timestamp
+- Char, Varchar, String
+- Binary, UUID (when supported), Fixed-length binary
+- Struct (nested complex type)
+- Array/List collections
+- Map collections
+- Variant type (when supported)
+- Time type (when supported)
+- Each type has dedicated table creation, insertion, and validation tests
 
 ### Core SQL Writes (20_writes_sql_core)
 - INSERT INTO / INSERT SELECT
@@ -199,9 +212,12 @@ GROUP                    CASE                                                 ST
 00_env                   seed_base_tables                                     PASS      2.31  
 10_ddl_core              create_table_as_select_basic                         PASS      1.45  
 ...
+15_ddl_data_types        create_boolean_table                                 PASS      0.89
+15_ddl_data_types        create_struct_table                                  PASS      1.02
+...
 30_writes_dfv2_core      dfv2_replace_table                                   SKIP      0.03  DataFrameWriterV2.replace() not supported in this Spark version
 ...
-TOTAL=75  PASS=68  FAIL=0  SKIP=7
+TOTAL=96  PASS=89  FAIL=0  SKIP=7
 ```
 
 ## Requirements
