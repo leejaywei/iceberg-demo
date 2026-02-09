@@ -831,9 +831,9 @@ class Suite:
             ) USING iceberg
         """)
         run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, true), (2, false), (3, NULL)")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 3, "Should have 3 rows")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl} WHERE bool_col = true", 1, "Should have 1 true value")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl} WHERE bool_col = false", 1, "Should have 1 false value")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 3, "Should have 3 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl} WHERE bool_col = true", 1, "Should have 1 true value")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl} WHERE bool_col = false", 1, "Should have 1 false value")
         run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
@@ -848,7 +848,7 @@ class Suite:
             ) USING iceberg
         """)
         run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, 127), (2, -128), (3, 0), (4, NULL)")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         assert_sql_scalar(self.spark, f"SELECT byte_col FROM {tbl} WHERE id = 1", 127, "Max byte value")
         assert_sql_scalar(self.spark, f"SELECT byte_col FROM {tbl} WHERE id = 2", -128, "Min byte value")
         run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
@@ -865,7 +865,7 @@ class Suite:
             ) USING iceberg
         """)
         run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, 32767), (2, -32768), (3, 0), (4, NULL)")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         assert_sql_scalar(self.spark, f"SELECT short_col FROM {tbl} WHERE id = 1", 32767, "Max short value")
         assert_sql_scalar(self.spark, f"SELECT short_col FROM {tbl} WHERE id = 2", -32768, "Min short value")
         run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
@@ -882,7 +882,7 @@ class Suite:
             ) USING iceberg
         """)
         run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, 2147483647), (2, -2147483648), (3, 0), (4, NULL)")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         assert_sql_scalar(self.spark, f"SELECT int_col FROM {tbl} WHERE id = 1", 2147483647, "Max int value")
         assert_sql_scalar(self.spark, f"SELECT int_col FROM {tbl} WHERE id = 2", -2147483648, "Min int value")
         run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
@@ -899,7 +899,7 @@ class Suite:
             ) USING iceberg
         """)
         run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, 9223372036854775807), (2, -9223372036854775808), (3, 0), (4, NULL)")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         assert_sql_scalar(self.spark, f"SELECT long_col FROM {tbl} WHERE id = 1", 9223372036854775807, "Max long value")
         run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
@@ -915,7 +915,7 @@ class Suite:
             ) USING iceberg
         """)
         run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, 3.14159), (2, -2.71828), (3, 0.0), (4, NULL)")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
@@ -930,7 +930,7 @@ class Suite:
             ) USING iceberg
         """)
         run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, 3.141592653589793), (2, -2.718281828459045), (3, 0.0), (4, NULL)")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
@@ -945,7 +945,7 @@ class Suite:
             ) USING iceberg
         """)
         run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, 12345.67), (2, -9999.99), (3, 0.00), (4, NULL)")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
@@ -960,7 +960,7 @@ class Suite:
             ) USING iceberg
         """)
         run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, DATE '2024-01-15'), (2, DATE '1970-01-01'), (3, DATE '2999-12-31'), (4, NULL)")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
@@ -975,7 +975,7 @@ class Suite:
             ) USING iceberg
         """)
         run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, TIMESTAMP '2024-01-15 12:30:45'), (2, TIMESTAMP '1970-01-01 00:00:00'), (3, TIMESTAMP '2999-12-31 23:59:59'), (4, NULL)")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
@@ -990,7 +990,7 @@ class Suite:
             ) USING iceberg
         """)
         run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, 'hello'), (2, 'test'), (3, 'a'), (4, NULL)")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
@@ -1005,7 +1005,7 @@ class Suite:
             ) USING iceberg
         """)
         run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, 'hello world'), (2, 'test varchar'), (3, 'a'), (4, NULL)")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
@@ -1020,7 +1020,7 @@ class Suite:
             ) USING iceberg
         """)
         run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, 'hello world'), (2, 'test string with a longer text'), (3, ''), (4, NULL)")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
@@ -1035,7 +1035,7 @@ class Suite:
             ) USING iceberg
         """)
         run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, CAST('hello' AS BINARY)), (2, CAST('world' AS BINARY)), (3, CAST('' AS BINARY)), (4, NULL)")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         run_sql(self.spark, f"SELECT id, CAST(binary_col AS STRING) as binary_str FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
@@ -1067,7 +1067,7 @@ class Suite:
         if not ok2:
             raise SkipCase(f"UUID function not supported: {err2}")
         
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 3, "Should have 3 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 3, "Should have 3 rows")
         run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
@@ -1090,7 +1090,7 @@ class Suite:
             raise SkipCase(f"Fixed binary type not supported: {err}")
         
         run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, CAST('12345' AS BINARY)), (2, CAST('abcde' AS BINARY)), (3, NULL)")
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 3, "Should have 3 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 3, "Should have 3 rows")
         run_sql(self.spark, f"SELECT id, CAST(fixed_col AS STRING) as fixed_str FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
@@ -1110,7 +1110,7 @@ class Suite:
             (2, named_struct('name', 'Bob', 'age', 25, 'city', 'SF')),
             (3, NULL)
         """)
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 3, "Should have 3 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 3, "Should have 3 rows")
         run_sql(self.spark, f"SELECT id, struct_col.name, struct_col.age, struct_col.city FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
@@ -1131,7 +1131,7 @@ class Suite:
             (3, array()),
             (4, NULL)
         """)
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         run_sql(self.spark, f"SELECT id, array_col, size(array_col) as array_size FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
@@ -1145,14 +1145,11 @@ class Suite:
                 map_col map<string, int>
             ) USING iceberg
         """)
-        run_sql(self.spark, f"""
-            INSERT INTO {tbl} VALUES 
-            (1, map('key1', 100, 'key2', 200)),
-            (2, map('a', 1, 'b', 2, 'c', 3)),
-            (3, map()),
-            (4, NULL)
-        """)
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        run_sql(self.spark, f"INSERT INTO {tbl} VALUES (1, map('key1', 100, 'key2', 200))")
+        run_sql(self.spark, f"INSERT INTO {tbl} VALUES (2, map('a', 1, 'b', 2, 'c', 3))")
+        run_sql(self.spark, f"INSERT INTO {tbl} SELECT 3, map_from_arrays(array(), array())")
+        run_sql(self.spark, f"INSERT INTO {tbl} VALUES (4, NULL)")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         run_sql(self.spark, f"SELECT id, map_col, size(map_col) as map_size FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
@@ -1184,7 +1181,7 @@ class Suite:
         if not ok2:
             raise SkipCase(f"VARIANT operations not supported: {err2}")
         
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
@@ -1218,7 +1215,7 @@ class Suite:
         if not ok2:
             raise SkipCase(f"TIME operations not supported: {err2}")
         
-        assert_sql_count(self.spark, f"SELECT * FROM {tbl}", 4, "Should have 4 rows")
+        assert_sql_count(self.spark, f"SELECT count(*) FROM {tbl}", 4, "Should have 4 rows")
         run_sql(self.spark, f"SELECT * FROM {tbl} ORDER BY id", show=True)
         run_sql(self.spark, f"DROP TABLE {tbl}")
 
