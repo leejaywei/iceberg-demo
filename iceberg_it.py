@@ -206,7 +206,10 @@ class Suite:
             # migration-specific
             "src_parquet_tbl",
             "addfiles_target_tbl",
-            "src_parquet_tbl_BACKUP_",
+            "src_parquet_tbl_BACKUP",
+            # snapshot tables
+            "snapshot_source",
+            "snapshot_target",
             # new test tables
             "sample_with_comments",
             "sample_with_location",
@@ -1649,8 +1652,10 @@ class Suite:
         # Create small source table
         src_tbl = self.t("snapshot_source")
         snap_tbl = self.t("snapshot_target")
-        run_sql(self.spark, f"DROP TABLE IF EXISTS {src_tbl}")
-        run_sql(self.spark, f"DROP TABLE IF EXISTS {snap_tbl}")
+        try_sql(self.spark, f"DROP TABLE IF EXISTS {snap_tbl} PURGE")
+        try_sql(self.spark, f"DROP TABLE IF EXISTS {snap_tbl}")
+        try_sql(self.spark, f"DROP TABLE IF EXISTS {src_tbl} PURGE")
+        try_sql(self.spark, f"DROP TABLE IF EXISTS {src_tbl}")
         run_sql(self.spark, f"CREATE TABLE {src_tbl} (id bigint, value string) USING parquet")
         run_sql(self.spark, f"INSERT INTO {src_tbl} VALUES (1,'a'),(2,'b'),(3,'c')")
         
@@ -2053,7 +2058,7 @@ class Suite:
         if not self.run_procedures:
             raise SkipCase("procedures disabled")
 
-        for tbl in ["src_parquet_tbl", "addfiles_target_tbl", "src_parquet_tbl_BACKUP_"]:
+        for tbl in ["src_parquet_tbl", "addfiles_target_tbl", "src_parquet_tbl_BACKUP"]:
             try_sql(self.spark, f"DROP TABLE IF EXISTS {self.t(tbl)} PURGE")
             try_sql(self.spark, f"DROP TABLE IF EXISTS {self.t(tbl)}")
 
@@ -2288,7 +2293,7 @@ class Suite:
 
         run_sql(self.spark, f"""
             CALL {self.catalog}.system.create_changelog_view(
-              table => '{self.db}.cdc_tbl',
+              table => 'cdc_tbl',
               changelog_view => 'cdc_changes',
               options => map('start-snapshot-id','{start_sid}','end-snapshot-id','{end_sid}'),
               identifier_columns => array('id')
