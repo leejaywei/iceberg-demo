@@ -218,12 +218,52 @@ class Suite:
             "sample_rename_old",
             "sample_rename_new",
             "sample_alter_comment",
+            # data type test tables
+            "test_boolean_table",
+            "test_byte_table",
+            "test_short_table",
+            "test_integer_table",
+            "test_long_table",
+            "test_float_table",
+            "test_double_table",
+            "test_decimal_table",
+            "test_date_table",
+            "test_timestamp_table",
+            "test_char_table",
+            "test_varchar_table",
+            "test_string_table",
+            "test_binary_table",
+            "test_uuid_table",
+            "test_fixed_table",
+            "test_struct_table",
+            "test_array_table",
+            "test_map_table",
+            "test_variant_table",
+            "test_time_table",
+            # merge test tables
+            "merge_del_target",
+            "merge_del_source",
+            "merge_multi_target",
+            "merge_multi_source",
+            "merge_source_target",
+            "merge_source_src",
+            # branch write tables
+            "branch_merge_source",
+            # dataframe advanced tables
+            "schema_merge_tbl",
+            # procedure temp tables
+            "expire_snap_temp",
+            "orphan_safe_temp",
+            # ddl temp tables
+            "tmp_drop",
         ]:
             try_sql(self.spark, f"DROP TABLE IF EXISTS {self.t(tbl)} PURGE")
             try_sql(self.spark, f"DROP TABLE IF EXISTS {self.t(tbl)}")
 
     def env_seed_base_tables(self):
         # base unpartitioned
+        try_sql(self.spark, f"DROP TABLE IF EXISTS {self.t('sample_unpart')} PURGE")
+        try_sql(self.spark, f"DROP TABLE IF EXISTS {self.t('sample_unpart')}")
         run_sql(self.spark, f"""
             CREATE TABLE {self.t("sample_unpart")} (
                 id bigint NOT NULL,
@@ -256,6 +296,7 @@ class Suite:
     # DDL cases
     # ----------------------------
     def ddl_ctas_basic(self):
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {self.t('sample_ctas')}")
         run_sql(self.spark, f"""
             CREATE TABLE {self.t("sample_ctas")}
             USING iceberg
@@ -292,6 +333,7 @@ class Suite:
         """)
 
     def ddl_drop_table_and_purge(self):
+        run_sql(self.spark, f"DROP TABLE IF EXISTS {self.t('tmp_drop')}")
         run_sql(self.spark, f"CREATE TABLE {self.t('tmp_drop')} (id bigint) USING iceberg")
         run_sql(self.spark, f"DROP TABLE {self.t('tmp_drop')}")
         run_sql(self.spark, f"CREATE TABLE {self.t('tmp_drop')} (id bigint) USING iceberg")
@@ -1679,8 +1721,10 @@ class Suite:
         run_sql(self.spark, f"SELECT * FROM {snap_tbl} ORDER BY id", show=True)
         
         # Clean up
-        run_sql(self.spark, f"DROP TABLE IF EXISTS {snap_tbl}")
-        run_sql(self.spark, f"DROP TABLE IF EXISTS {src_tbl}")
+        try_sql(self.spark, f"DROP TABLE IF EXISTS {snap_tbl} PURGE")
+        try_sql(self.spark, f"DROP TABLE IF EXISTS {snap_tbl}")
+        try_sql(self.spark, f"DROP TABLE IF EXISTS {src_tbl} PURGE")
+        try_sql(self.spark, f"DROP TABLE IF EXISTS {src_tbl}")
 
     def proc_set_current_snapshot_with_ref(self):
         """system.set_current_snapshot using ref parameter (branch or tag)."""
