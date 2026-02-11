@@ -11,10 +11,11 @@ import org.scalatest.funsuite.AnyFunSuite
  * Comprehensive unit tests for [[ReadOnlyTableCheckRule]].
  *
  * Test matrix:
- *   V1 Hive tables  – INSERT, INSERT OVERWRITE, ALTER (columns/properties/location/rename),
- *                      DROP, TRUNCATE, SELECT (allowed), non-read-only (allowed)
+ *   V1 Hive tables  – INSERT, INSERT OVERWRITE, ALTER (columns/partitions/properties/location/rename),
+ *                      DROP, TRUNCATE, REPAIR, LOAD DATA, ANALYZE, SELECT (allowed), non-read-only (allowed)
  *   V2 tables       – INSERT, DELETE, UPDATE, MERGE, ALTER (columns/properties),
  *                      DROP, SELECT (allowed), non-read-only (allowed)
+ *   Database         – DROP DATABASE CASCADE with read-only table
  */
 class ReadOnlyTableSuite extends AnyFunSuite with BeforeAndAfterAll {
 
@@ -46,6 +47,11 @@ class ReadOnlyTableSuite extends AnyFunSuite with BeforeAndAfterAll {
     spark.sql(
       """CREATE TABLE ro_test.normal_v1 (id INT, name STRING)
         |STORED AS PARQUET""".stripMargin)
+    spark.sql(
+      """CREATE TABLE ro_test.readonly_v1_part (id INT, name STRING)
+        |PARTITIONED BY (dt STRING)
+        |STORED AS PARQUET
+        |TBLPROPERTIES ('hive-ext.readOnly' = 'true')""".stripMargin)
 
     // ── V2 tables (testcat) ─────────────────────────────────────
     spark.sql(
@@ -124,6 +130,63 @@ class ReadOnlyTableSuite extends AnyFunSuite with BeforeAndAfterAll {
 
   test("V1: TRUNCATE TABLE read-only table is blocked") {
     assertReadOnlyBlocked("TRUNCATE TABLE ro_test.readonly_v1")
+  }
+
+  test("V1: ALTER TABLE ADD PARTITION on read-only table is blocked") {
+    assertReadOnlyBlocked(
+      "ALTER TABLE ro_test.readonly_v1_part ADD PARTITION (dt='2024')")
+  }
+
+  test("V1: ALTER TABLE DROP PARTITION on read-only table is blocked") {
+    assertReadOnlyBlocked(
+      "ALTER TABLE ro_test.readonly_v1_part DROP PARTITION (dt='2024')")
+  }
+
+  test("V1: ALTER TABLE RENAME PARTITION on read-only table is blocked") {
+    assertReadOnlyBlocked(
+      "ALTER TABLE ro_test.readonly_v1_part PARTITION (dt='2024') RENAME TO PARTITION (dt='2025')")
+  }
+
+  test("V1: MSCK REPAIR TABLE on read-only table is blocked") {
+    assertReadOnlyBlocked("MSCK REPAIR TABLE ro_test.readonly_v1_part")
+  }
+
+  test("V1: ANALYZE TABLE on read-only table is blocked") {
+    assertReadOnlyBlocked("ANALYZE TABLE ro_test.readonly_v1 COMPUTE STATISTICS")
+  }
+
+  test("V1: ANALYZE TABLE COLUMNS on read-only table is blocked") {
+    assertReadOnlyBlocked(
+      "ANALYZE TABLE ro_test.readonly_v1 COMPUTE STATISTICS FOR COLUMNS id, name")
+  }
+
+  test("V1: ANALYZE TABLE PARTITION on read-only table is blocked") {
+    assertReadOnlyBlocked(
+      "ANALYZE TABLE ro_test.readonly_v1_part PARTITION (dt='2024') COMPUTE STATISTICS")
+  }
+
+  test("V1: LOAD DATA on read-only table is blocked") {
+    val tmpFile = new File(warehouseDir, "load_test.txt")
+    tmpFile.createNewFile()
+    assertReadOnlyBlocked(
+      s"LOAD DATA LOCAL INPATH '${tmpFile.getAbsolutePath}' INTO TABLE ro_test.readonly_v1")
+  }
+
+  test("V1: DROP DATABASE CASCADE with read-only table is blocked") {
+    spark.sql("CREATE DATABASE IF NOT EXISTS ro_drop_db_test")
+    spark.sql(
+      """CREATE TABLE ro_drop_db_test.readonly_tbl (id INT)
+        |STORED AS PARQUET
+        |TBLPROPERTIES ('hive-ext.readOnly' = 'true')""".stripMargin)
+    assertReadOnlyBlocked("DROP DATABASE ro_drop_db_test CASCADE")
+  }
+
+  test("V1: DROP DATABASE CASCADE without read-only table is allowed") {
+    spark.sql("CREATE DATABASE IF NOT EXISTS ro_drop_db_ok")
+    spark.sql(
+      """CREATE TABLE ro_drop_db_ok.normal_tbl (id INT)
+        |STORED AS PARQUET""".stripMargin)
+    spark.sql("DROP DATABASE ro_drop_db_ok CASCADE")
   }
 
   // ══════════════════════════════════════════════════════════════

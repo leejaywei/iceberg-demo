@@ -3,19 +3,28 @@ package com.github.readonly
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.TableIdentifier
-import org.apache.spark.sql.catalyst.analysis.{ResolvedIdentifier, ResolvedTable}
+import org.apache.spark.sql.catalyst.analysis.{ResolvedIdentifier, ResolvedNamespace, ResolvedTable}
 import org.apache.spark.sql.catalyst.catalog.{CatalogTable, HiveTableRelation}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.connector.catalog.{Table, TableCatalog}
 import org.apache.spark.sql.execution.command.{
   AlterTableAddColumnsCommand,
+  AlterTableAddPartitionCommand,
   AlterTableChangeColumnCommand,
+  AlterTableDropPartitionCommand,
   AlterTableRenameCommand,
+  AlterTableRenamePartitionCommand,
   AlterTableSerDePropertiesCommand,
   AlterTableSetLocationCommand,
   AlterTableSetPropertiesCommand,
   AlterTableUnsetPropertiesCommand,
+  AnalyzeColumnCommand,
+  AnalyzePartitionCommand,
+  AnalyzeTableCommand,
+  DropDatabaseCommand,
   DropTableCommand,
+  LoadDataCommand,
+  RepairTableCommand,
   TruncateTableCommand
 }
 import org.apache.spark.sql.execution.datasources.{
@@ -34,7 +43,10 @@ import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
  *  - V2 DDL: ALTER TABLE (add/drop/rename/alter columns, set/unset properties),
  *            DROP TABLE, RENAME TABLE, COMMENT ON TABLE
  *  - V1 data writes: INSERT via Hive / Hadoop FS / DataSource
- *  - V1 DDL: ALTER TABLE variants, DROP TABLE, TRUNCATE TABLE
+ *  - V1 DDL: ALTER TABLE variants (columns, partitions, properties, location,
+ *            serde, rename), DROP TABLE, TRUNCATE TABLE, REPAIR TABLE, LOAD DATA
+ *  - V1 statistics: ANALYZE TABLE, ANALYZE COLUMNS, ANALYZE PARTITION
+ *  - Database: DROP DATABASE CASCADE (if any table in the database is read-only)
  */
 class ReadOnlyTableCheckRule(session: SparkSession) extends (LogicalPlan => Unit) {
 
@@ -86,6 +98,12 @@ class ReadOnlyTableCheckRule(session: SparkSession) extends (LogicalPlan => Unit
       checkV1ByIdentifier(cmd.table, "ALTER TABLE ADD COLUMNS")
     case cmd: AlterTableChangeColumnCommand =>
       checkV1ByIdentifier(cmd.tableName, "ALTER TABLE CHANGE COLUMN")
+    case cmd: AlterTableAddPartitionCommand =>
+      checkV1ByIdentifier(cmd.tableName, "ALTER TABLE ADD PARTITION")
+    case cmd: AlterTableDropPartitionCommand =>
+      checkV1ByIdentifier(cmd.tableName, "ALTER TABLE DROP PARTITION")
+    case cmd: AlterTableRenamePartitionCommand =>
+      checkV1ByIdentifier(cmd.tableName, "ALTER TABLE RENAME PARTITION")
     case cmd: AlterTableRenameCommand =>
       checkV1ByIdentifier(cmd.oldName, "ALTER TABLE RENAME")
     case cmd: AlterTableSetPropertiesCommand =>
@@ -100,6 +118,28 @@ class ReadOnlyTableCheckRule(session: SparkSession) extends (LogicalPlan => Unit
       checkV1ByIdentifier(cmd.tableName, "TRUNCATE TABLE")
     case cmd: DropTableCommand =>
       checkV1ByIdentifier(cmd.tableName, "DROP TABLE")
+    case cmd: RepairTableCommand =>
+      checkV1ByIdentifier(cmd.tableName, "REPAIR TABLE")
+    case cmd: LoadDataCommand =>
+      checkV1ByIdentifier(cmd.table, "LOAD DATA")
+
+    // ── V1 statistics operations ──────────────────────────────────
+    case cmd: AnalyzeTableCommand =>
+      checkV1ByIdentifier(cmd.tableIdent, "ANALYZE TABLE")
+    case cmd: AnalyzeColumnCommand =>
+      checkV1ByIdentifier(cmd.tableIdent, "ANALYZE TABLE COLUMNS")
+    case cmd: AnalyzePartitionCommand =>
+      checkV1ByIdentifier(cmd.tableIdent, "ANALYZE TABLE PARTITION")
+
+    // ── Database operations ───────────────────────────────────────
+    case cmd: DropDatabaseCommand if cmd.cascade =>
+      checkDatabaseForReadOnly(cmd.databaseName, "DROP DATABASE CASCADE")
+    case d: DropNamespace if d.cascade =>
+      d.namespace match {
+        case ResolvedNamespace(_, ns) if ns.nonEmpty =>
+          checkDatabaseForReadOnly(ns.head, "DROP DATABASE CASCADE")
+        case _ =>
+      }
 
     case _ => // no check needed
   }
@@ -155,6 +195,22 @@ class ReadOnlyTableCheckRule(session: SparkSession) extends (LogicalPlan => Unit
     val catalog = session.sessionState.catalog
     if (catalog.tableExists(name)) {
       checkV1CatalogTable(catalog.getTableMetadata(name), operation)
+    }
+  }
+
+  private def checkDatabaseForReadOnly(
+      dbName: String,
+      operation: String): Unit = {
+    val catalog = session.sessionState.catalog
+    if (catalog.databaseExists(dbName)) {
+      catalog.listTables(dbName).foreach { tableName =>
+        if (catalog.tableExists(tableName)) {
+          val meta = catalog.getTableMetadata(tableName)
+          if (meta.properties.get(READONLY_KEY).exists(_.equalsIgnoreCase("true"))) {
+            throwReadOnly(meta.identifier.unquotedString, operation)
+          }
+        }
+      }
     }
   }
 
