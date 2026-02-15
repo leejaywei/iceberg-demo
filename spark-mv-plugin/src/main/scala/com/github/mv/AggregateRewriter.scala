@@ -456,7 +456,4 @@ object AggregateRewriter {
       aggregates: Seq[(String, String)],           // (funcName, sourceCol)
       aggregateDetails: Seq[(String, String, String)], // (alias, funcName, sourceCol)
       outputNames: Set[String])
-
-  // Override tryRewriteWithMV to use the proper buildAggMap
-  // (this is handled inline via mi.aggregateDetails already)
 }
